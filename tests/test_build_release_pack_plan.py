@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import sys
 import unittest
+from argparse import Namespace
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
@@ -11,6 +12,8 @@ sys.path.insert(0, str(ROOT / "scripts"))
 
 from build_release_pack import (  # noqa: E402
     EpisodeResult,
+    apply_job_document,
+    encoder_output_args,
     hash_file,
     is_full_source_segment,
     parse_args,
@@ -19,6 +22,7 @@ from build_release_pack import (  # noqa: E402
     update_episode_checkpoint,
 )
 from episode_planner import SourceSegment  # noqa: E402
+from encoder_selection import EncoderChoice  # noqa: E402
 from remaster_job_core import load_job, new_job, save_job  # noqa: E402
 
 
@@ -84,6 +88,38 @@ class BuildReleasePackPlanTests(unittest.TestCase):
         args = parse_args(["--job-file", "/tmp/job.json"])
         self.assertEqual(args.job_file, Path("/tmp/job.json"))
         self.assertIsNone(args.source_root)
+        self.assertEqual(args.workers, "auto")
+        self.assertEqual(args.encoder, "auto")
+        self.assertTrue(args.cache)
+
+    def test_job_document_maps_execution_options(self) -> None:
+        document = new_job(Path("/tmp/output"))
+        document["source_root"] = "/tmp/source"
+        document["source_series"] = "Source"
+        document["output_series"] = "Output"
+        document["rights_status"] = "owned"
+        document["execution"] = {"workers": 3, "enhancement_workers": 1, "encoder": "software", "cache": False}
+        args = apply_job_document(parse_args(["--job-file", "/tmp/job.json"]), document)
+        self.assertEqual(args.workers, 3)
+        self.assertEqual(args.encoder, "software")
+        self.assertFalse(args.cache)
+
+    def test_hardware_encoder_args_do_not_include_software_preset(self) -> None:
+        software = Namespace(
+            preset="medium",
+            encoder_choice=EncoderChoice("software", "libx264", ("-c:v", "libx264"), False),
+        )
+        hardware = Namespace(
+            preset="medium",
+            encoder_choice=EncoderChoice(
+                "hardware",
+                "h264_videotoolbox",
+                ("-c:v", "h264_videotoolbox", "-allow_sw", "0"),
+                True,
+            ),
+        )
+        self.assertEqual(encoder_output_args(software), ["-c:v", "libx264", "-preset", "medium"])
+        self.assertEqual(encoder_output_args(hardware), ["-c:v", "h264_videotoolbox", "-allow_sw", "0"])
 
 
 if __name__ == "__main__":

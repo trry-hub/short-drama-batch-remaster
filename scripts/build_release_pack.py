@@ -9,6 +9,7 @@ inputs, but it does not claim to bypass or predict any platform review system.
 from __future__ import annotations
 
 import argparse
+import copy
 import csv
 import hashlib
 import json
@@ -23,8 +24,11 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Iterable
 
+from batch_executor import execute_episodes, resolve_worker_count
+from encoder_selection import EncoderChoice, select_encoder
 from episode_planner import SourceSegment
 from remaster_job_core import load_job, save_job
+from stage_cache import StageCache, build_cache_key
 
 
 VIDEO_EXTENSIONS = {".mp4", ".mov", ".mkv", ".m4v", ".avi", ".webm"}
@@ -87,6 +91,29 @@ class EpisodeResult:
     title_candidates: list[str] = field(default_factory=list)
     problems: list[str] = field(default_factory=list)
     attempts: int = 0
+    cache_status: str = "disabled"
+    cache_key: str | None = None
+    encoder: dict[str, Any] = field(default_factory=dict)
+    log_lines: list[str] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class EpisodeContext:
+    args: argparse.Namespace
+    videos_dir: Path
+    covers_dir: Path
+    temp_root: Path
+    checkpoints: dict[int, dict[str, Any]]
+    cache: StageCache | None
+    encoder_choice: EncoderChoice
+
+
+class EpisodeLogger:
+    def __init__(self) -> None:
+        self.lines: list[str] = []
+
+    def line(self, message: str) -> None:
+        self.lines.append(message)
 
 
 class BatchLogger:
@@ -435,6 +462,14 @@ def materialize_episode_input(
     return make_concat_input(parts, temp_dir, logger, job.output_episode)
 
 
+def encoder_output_args(args: argparse.Namespace) -> list[str]:
+    choice: EncoderChoice = getattr(args, "encoder_choice", EncoderChoice("software", "libx264", ("-c:v", "libx264"), False))
+    output = list(choice.ffmpeg_args)
+    if not choice.hardware:
+        output.extend(["-preset", args.preset])
+    return output
+
+
 def encode_episode(input_path: Path, output_path: Path, source_probe: ProbeInfo, args: argparse.Namespace) -> None:
     video_chain = (
         f"setpts=PTS/{args.speed:.6f},"
@@ -444,10 +479,7 @@ def encode_episode(input_path: Path, output_path: Path, source_probe: ProbeInfo,
         "format=yuv420p"
     )
     common_output = [
-        "-c:v",
-        "libx264",
-        "-preset",
-        args.preset,
+        *encoder_output_args(args),
         "-b:v",
         args.video_bitrate,
         "-maxrate",
@@ -601,6 +633,208 @@ def extract_cover_candidates(video_path: Path, covers_dir: Path, episode: int, d
             results.append(cover_path)
     logger.line(f"Episode {episode:03d}: cover candidates {len(results)}")
     return results
+
+
+def episode_cache_key(
+    job: EpisodeJob,
+    source_hashes: list[dict[str, str]],
+    args: argparse.Namespace,
+    choice: EncoderChoice,
+) -> str:
+    profile = {
+        "width": args.width,
+        "height": args.height,
+        "speed": args.speed,
+        "video_bitrate": args.video_bitrate,
+        "audio_bitrate": args.audio_bitrate,
+        "maxrate": args.maxrate,
+        "bufsize": args.bufsize,
+        "brightness": args.brightness,
+        "contrast": args.contrast,
+        "saturation": args.saturation,
+    }
+    options = {
+        "encoder": choice.codec,
+        "output_series": args.output_series,
+        "metadata_comment": "authorized-release-local-qc",
+    }
+    return build_cache_key(source_hashes, [asdict(segment) for segment in job.segments], profile, options, "release-pack-v2")
+
+
+def _record_output(result: EpisodeResult, output_path: Path, args: argparse.Namespace) -> None:
+    result.output_hashes = hash_file(output_path)
+    result.output_probe = probe_video(output_path)
+    result.qc_status, qc_problems = qc_status(result.output_probe, args)
+    result.problems.extend(qc_problems)
+    result.local_difference = local_difference_report(
+        result.source_hashes,
+        result.output_hashes,
+        result.source_probe,
+        result.output_probe,
+    )
+    if result.qc_status != "pass" or result.local_difference.get("status") != "pass":
+        raise RuntimeError("QC/local difference failed")
+
+
+def _encode_with_fallback(
+    input_path: Path,
+    output_path: Path,
+    source_probe: ProbeInfo,
+    args: argparse.Namespace,
+    choice: EncoderChoice,
+    logger: EpisodeLogger,
+) -> EncoderChoice:
+    selected_args = copy.copy(args)
+    selected_args.encoder_choice = choice
+    try:
+        encode_episode(input_path, output_path, source_probe, selected_args)
+        return choice
+    except Exception as exc:
+        if not choice.hardware or args.encoder != "auto":
+            raise
+        software = EncoderChoice(
+            mode="software",
+            codec="libx264",
+            ffmpeg_args=("-c:v", "libx264"),
+            hardware=False,
+            fallback_reason=str(exc),
+        )
+        logger.line(f"Episode hardware encode failed; falling back to libx264: {exc}")
+        output_path.unlink(missing_ok=True)
+        selected_args.encoder_choice = software
+        encode_episode(input_path, output_path, source_probe, selected_args)
+        return software
+
+
+def process_episode(job: EpisodeJob, context: EpisodeContext) -> EpisodeResult:
+    args = context.args
+    logger = EpisodeLogger()
+    checkpoint = context.checkpoints.get(job.output_episode)
+    if args.resume and should_skip_episode(checkpoint):
+        result = episode_result_from_checkpoint(checkpoint or {})
+        result.log_lines = [f"Episode {job.output_episode:03d}: checkpoint passed; skipping encode"]
+        return result
+
+    result = EpisodeResult(
+        episode_number=job.output_episode,
+        sources=[str(path) for path in job.source_paths],
+        output_path=None,
+        status="planned" if args.dry_run else "started",
+        qc_status="not_run",
+        cache_status="disabled" if context.cache is None else "miss",
+        encoder={
+            "requested_mode": args.encoder,
+            "codec": context.encoder_choice.codec,
+            "hardware": context.encoder_choice.hardware,
+            "fallback_reason": context.encoder_choice.fallback_reason,
+        },
+    )
+    logger.line(
+        f"Remaster: {', '.join(path.name for path in job.source_paths)} -> "
+        f"{args.output_series} episode {job.output_episode:03d}"
+    )
+    try:
+        result.source_hashes = [hash_file(path) for path in job.source_paths]
+        result.source_probe = [probe_video(path) for path in job.source_paths]
+    except Exception as exc:
+        result.status = "failed"
+        result.qc_status = "fail"
+        result.problems.append(str(exc))
+        logger.line(f"Episode {job.output_episode:03d}: source probe failed: {exc}")
+        result.log_lines = logger.lines
+        return result
+
+    output_path = context.videos_dir / f"{slugify(args.output_series)}-episode-{job.output_episode:03d}.mp4"
+    result.output_path = str(output_path)
+    result.title_candidates = title_candidates(args.output_series, job.output_episode)
+    if args.dry_run:
+        result.status = "planned"
+        result.log_lines = logger.lines
+        return result
+
+    choice = context.encoder_choice
+    key = episode_cache_key(job, result.source_hashes, args, choice)
+    result.cache_key = key
+    if context.cache is not None:
+        hit = context.cache.lookup(key)
+        if hit is not None:
+            try:
+                context.cache.materialize(hit, output_path)
+                _record_output(result, output_path, args)
+                result.status = "complete"
+                result.cache_status = "hit"
+                logger.line(f"Episode {job.output_episode:03d}: validated cache hit; skipping encode")
+            except Exception as exc:
+                result.problems.append(f"cached output rejected: {exc}")
+                result.cache_status = "miss"
+                output_path.unlink(missing_ok=True)
+
+    worker_temp = Path(tempfile.mkdtemp(prefix=f"episode-{job.output_episode:03d}-", dir=context.temp_root))
+    try:
+        if result.status != "complete":
+            for attempt in range(1, 3):
+                result.attempts = attempt
+                try:
+                    episode_input = materialize_episode_input(job, worker_temp, logger, args)
+                    input_probe = probe_video(episode_input)
+                    logger.line(
+                        f"Output {args.width}x{args.height}, {args.speed:.3f}x; "
+                        f"target bitrate {args.video_bitrate}; metadata normalized for authorized release"
+                    )
+                    effective_choice = _encode_with_fallback(
+                        episode_input,
+                        output_path,
+                        input_probe,
+                        args,
+                        choice,
+                        logger,
+                    )
+                    result.encoder = {
+                        "requested_mode": args.encoder,
+                        "codec": effective_choice.codec,
+                        "hardware": effective_choice.hardware,
+                        "fallback_reason": effective_choice.fallback_reason,
+                    }
+                    result.cache_key = episode_cache_key(job, result.source_hashes, args, effective_choice)
+                    _record_output(result, output_path, args)
+                    result.status = "complete"
+                    if context.cache is not None and result.cache_key:
+                        context.cache.store(
+                            result.cache_key,
+                            output_path,
+                            validation_status="pass",
+                            metadata={"episode": job.output_episode, "encoder": result.encoder},
+                        )
+                        result.cache_status = "stored"
+                    logger.line(
+                        f"QC pass; duration: {result.output_probe.duration_s:.2f}s; "
+                        f"resolution: {result.output_probe.width}x{result.output_probe.height}; "
+                        f"bitrate: {result.output_probe.bitrate_mbps:.2f}Mbps; "
+                        f"size: {result.output_probe.size_mb:.2f}MB"
+                    )
+                    break
+                except Exception as exc:
+                    result.status = "failed"
+                    result.qc_status = "fail"
+                    result.problems.append(str(exc))
+                    if attempt < 2:
+                        logger.line(f"Episode {job.output_episode:03d}: attempt {attempt} failed; retrying: {exc}")
+                    else:
+                        logger.line(f"Episode {job.output_episode:03d}: failed after {attempt} attempts: {exc}")
+        if result.status == "complete" and not args.skip_covers and result.output_probe:
+            covers = extract_cover_candidates(
+                output_path,
+                context.covers_dir,
+                job.output_episode,
+                result.output_probe.duration_s,
+                logger,
+            )
+            result.cover_candidates = [str(path) for path in covers]
+    finally:
+        if not args.keep_temp:
+            shutil.rmtree(worker_temp, ignore_errors=True)
+    result.log_lines = logger.lines
+    return result
 
 
 def make_text_image(path: Path, title: str, lines: list[str]) -> Path:
@@ -783,6 +1017,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--contrast", type=float, default=1.02)
     parser.add_argument("--saturation", type=float, default=1.03)
     parser.add_argument("--preset", default="medium")
+    parser.add_argument("--workers", default="auto", help="Episode worker count or auto.")
+    parser.add_argument("--enhancement-workers", type=int, default=1)
+    parser.add_argument("--encoder", choices=["auto", "software", "hardware"], default="auto")
+    cache_group = parser.add_mutually_exclusive_group()
+    cache_group.add_argument("--cache", dest="cache", action="store_true", default=True)
+    cache_group.add_argument("--no-cache", dest="cache", action="store_false")
     parser.add_argument("--platform", default="WeChat Channels")
     parser.add_argument("--account", default="")
     parser.add_argument("--install-missing", action="store_true")
@@ -827,6 +1067,11 @@ def apply_job_document(args: argparse.Namespace, document: dict[str, Any]) -> ar
     args.platform = document.get("platform", args.platform)
     args.account = document.get("account", args.account)
     args.skip_covers = not bool(enhancements.get("covers", True))
+    execution = document.get("execution", {})
+    args.workers = execution.get("workers", args.workers)
+    args.enhancement_workers = int(execution.get("enhancement_workers", args.enhancement_workers))
+    args.encoder = execution.get("encoder", args.encoder)
+    args.cache = bool(execution.get("cache", args.cache))
     args.job_document = document
     return args
 
@@ -843,6 +1088,7 @@ def main() -> int:
         raise SystemExit(f"Source root does not exist: {args.source_root}")
 
     require_core_tools(args.install_missing)
+    args.encoder_choice = select_encoder(args.encoder)
     safe_output_root(args.output_root, args.force, args.dry_run, job_mode=args.job_file is not None)
 
     videos_dir = args.output_root / "videos"
@@ -882,6 +1128,12 @@ def main() -> int:
                 "saturation": args.saturation,
             },
         },
+        "execution": {
+            "workers": args.workers,
+            "enhancement_workers": args.enhancement_workers,
+            "encoder": asdict(args.encoder_choice),
+            "cache": args.cache,
+        },
         "policy": {
             "scope": "authorized release pack and local QC",
             "platform_review_guarantee": False,
@@ -895,111 +1147,44 @@ def main() -> int:
 
     temp_context = tempfile.TemporaryDirectory(prefix="short-drama-pack-")
     temp_dir = Path(temp_context.name)
-
+    checkpoints: dict[int, dict[str, Any]] = {}
+    if args.resume and args.job_file:
+        checkpoint_document = load_job(args.job_file)
+        checkpoints = {int(key): value for key, value in checkpoint_document.get("episodes", {}).items()}
+    cache = StageCache(args.output_root / ".job" / "cache") if args.cache and not args.dry_run else None
+    context = EpisodeContext(
+        args=args,
+        videos_dir=videos_dir,
+        covers_dir=covers_dir,
+        temp_root=temp_dir,
+        checkpoints=checkpoints,
+        cache=cache,
+        encoder_choice=args.encoder_choice,
+    )
+    worker_count = resolve_worker_count(args.workers)
+    logger.line(
+        f"Execution: {worker_count} video worker(s); encoder {args.encoder_choice.codec}; "
+        f"cache {'enabled' if cache else 'disabled'}"
+    )
     try:
-        for job in jobs:
-            checkpoint = None
-            if args.resume and args.job_file:
-                checkpoint = load_job(args.job_file).get("episodes", {}).get(str(job.output_episode))
-            if should_skip_episode(checkpoint):
-                result = episode_result_from_checkpoint(checkpoint)
-                logger.line(f"Episode {job.output_episode:03d}: checkpoint passed; skipping encode")
-            else:
-                result = EpisodeResult(
-                    episode_number=job.output_episode,
-                    sources=[str(path) for path in job.source_paths],
-                    output_path=None,
-                    status="planned" if args.dry_run else "started",
-                    qc_status="not_run",
-                )
-                logger.line(
-                    f"Remaster: {', '.join(path.name for path in job.source_paths)} -> "
-                    f"{args.output_series} episode {job.output_episode:03d}"
-                )
-
-                try:
-                    result.source_hashes = [hash_file(path) for path in job.source_paths]
-                    result.source_probe = [probe_video(path) for path in job.source_paths]
-                except Exception as exc:
-                    result.status = "failed"
-                    result.qc_status = "fail"
-                    result.problems.append(str(exc))
-                    logger.line(f"Episode {job.output_episode:03d}: source probe failed: {exc}")
-                    if args.job_file:
-                        update_episode_checkpoint(args.job_file, result)
-                    manifest["episodes"].append(asdict(result))
-                    continue
-
-                output_path = videos_dir / f"{slugify(args.output_series)}-episode-{job.output_episode:03d}.mp4"
-                result.output_path = str(output_path)
-                result.title_candidates = title_candidates(args.output_series, job.output_episode)
-
-                if args.dry_run:
-                    result.status = "planned"
-                else:
-                    for attempt in range(1, 3):
-                        result.attempts = attempt
-                        try:
-                            episode_input = materialize_episode_input(job, temp_dir, logger, args)
-                            input_probe = probe_video(episode_input)
-                            logger.line(
-                                f"Output {args.width}x{args.height}, {args.speed:.3f}x; "
-                                f"target bitrate {args.video_bitrate}; metadata normalized for authorized release"
-                            )
-                            encode_episode(episode_input, output_path, input_probe, args)
-                            result.output_hashes = hash_file(output_path)
-                            result.output_probe = probe_video(output_path)
-                            result.qc_status, qc_problems = qc_status(result.output_probe, args)
-                            result.problems.extend(qc_problems)
-                            result.local_difference = local_difference_report(
-                                result.source_hashes,
-                                result.output_hashes,
-                                result.source_probe,
-                                result.output_probe,
-                            )
-                            if result.qc_status != "pass" or result.local_difference.get("status") != "pass":
-                                raise RuntimeError("QC/local difference failed")
-                            result.status = "complete"
-                            logger.line(
-                                f"QC pass; duration: {result.output_probe.duration_s:.2f}s; "
-                                f"resolution: {result.output_probe.width}x{result.output_probe.height}; "
-                                f"bitrate: {result.output_probe.bitrate_mbps:.2f}Mbps; "
-                                f"size: {result.output_probe.size_mb:.2f}MB"
-                            )
-                            break
-                        except Exception as exc:
-                            result.status = "failed"
-                            result.qc_status = "fail"
-                            result.problems.append(str(exc))
-                            if attempt < 2:
-                                logger.line(f"Episode {job.output_episode:03d}: attempt {attempt} failed; retrying: {exc}")
-                            else:
-                                logger.line(f"Episode {job.output_episode:03d}: failed after {attempt} attempts: {exc}")
-
-                if result.status == "complete" and not args.skip_covers and result.output_probe:
-                    covers = extract_cover_candidates(
-                        output_path,
-                        covers_dir,
-                        job.output_episode,
-                        result.output_probe.duration_s,
-                        logger,
-                    )
-                    result.cover_candidates = [str(path) for path in covers]
-                    all_cover_paths.extend(covers[:1])
-
-                if args.job_file:
-                    update_episode_checkpoint(args.job_file, result)
-
+        results = execute_episodes(jobs, lambda episode_job: process_episode(episode_job, context), worker_count)
+        for result in results:
+            for message in result.log_lines:
+                logger.line(message)
+            if args.job_file:
+                update_episode_checkpoint(args.job_file, result)
+            if result.cover_candidates:
+                all_cover_paths.append(Path(result.cover_candidates[0]))
             cover_path = result.cover_candidates[0] if result.cover_candidates else ""
             release_rows.append(
                 {
                     "series_name": args.output_series,
-                    "episode_number": f"{job.output_episode:03d}",
+                    "episode_number": f"{result.episode_number:03d}",
                     "video_path": result.output_path or "",
                     "cover_path": cover_path,
                     "title": result.title_candidates[0] if result.title_candidates else "",
-                    "description": f"Draft release copy for {args.output_series} episode {job.output_episode:03d}.",
-                    "tags": f"{args.output_series},short drama,episode {job.output_episode:03d}",
+                    "description": f"Draft release copy for {args.output_series} episode {result.episode_number:03d}.",
+                    "tags": f"{args.output_series},short drama,episode {result.episode_number:03d}",
                     "platform": args.platform,
                     "account": args.account,
                     "status": "draft" if result.status == "complete" else "blocked",
@@ -1007,11 +1192,10 @@ def main() -> int:
                     "qc_status": result.qc_status,
                     "review_status": "draft",
                     "rights_status": args.rights_status,
-                    "notes": "Generated for authorized release review.",
+                    "notes": f"Generated for authorized release review; cache={result.cache_status}.",
                 }
             )
             manifest["episodes"].append(asdict(result))
-
     finally:
         if args.keep_temp:
             logger.line(f"Temporary files kept: {temp_dir}")
