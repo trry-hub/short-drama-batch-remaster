@@ -23,6 +23,9 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Iterable
 
+from episode_planner import SourceSegment
+from remaster_job_core import load_job, save_job
+
 
 VIDEO_EXTENSIONS = {".mp4", ".mov", ".mkv", ".m4v", ".avi", ".webm"}
 RELEASE_QUEUE_FIELDS = [
@@ -61,7 +64,11 @@ class ProbeInfo:
 @dataclass
 class EpisodeJob:
     output_episode: int
-    sources: list[Path]
+    segments: list[SourceSegment]
+
+    @property
+    def source_paths(self) -> list[Path]:
+        return list(dict.fromkeys(Path(segment.path) for segment in self.segments))
 
 
 @dataclass
@@ -79,6 +86,7 @@ class EpisodeResult:
     cover_candidates: list[str] = field(default_factory=list)
     title_candidates: list[str] = field(default_factory=list)
     problems: list[str] = field(default_factory=list)
+    attempts: int = 0
 
 
 class BatchLogger:
@@ -180,7 +188,22 @@ def parse_mapping_csv(mapping_csv: Path, source_root: Path, episode_index: dict[
             sources = [resolve_source_token(spec, source_root, episode_index) for spec in specs]
             if not sources:
                 raise ValueError(f"episode {output_episode} has no sources")
-            jobs.append(EpisodeJob(output_episode=output_episode, sources=sources))
+            jobs.append(
+                EpisodeJob(
+                    output_episode=output_episode,
+                    segments=[full_source_segment(path) for path in sources],
+                )
+            )
+    return jobs
+
+
+def parse_episode_plan(document: dict[str, Any]) -> list[EpisodeJob]:
+    jobs: list[EpisodeJob] = []
+    for item in document.get("episode_plan", []):
+        segments = [SourceSegment(**segment) for segment in item.get("segments", [])]
+        if not segments:
+            raise ValueError(f"episode {item.get('output_episode')} has no planned segments")
+        jobs.append(EpisodeJob(output_episode=int(item["output_episode"]), segments=segments))
     return jobs
 
 
@@ -192,6 +215,36 @@ def hash_file(path: Path) -> dict[str, str]:
             md5.update(chunk)
             sha256.update(chunk)
     return {"md5": md5.hexdigest(), "sha256": sha256.hexdigest()}
+
+
+def should_skip_episode(state: dict[str, Any] | None) -> bool:
+    if not state or state.get("status") != "complete" or state.get("qc_status") != "pass":
+        return False
+    output_path = Path(state.get("output_path") or "")
+    expected = state.get("output_sha256")
+    return bool(expected and output_path.is_file() and hash_file(output_path)["sha256"] == expected)
+
+
+def update_episode_checkpoint(job_path: Path, result: EpisodeResult) -> None:
+    document = load_job(job_path)
+    key = str(result.episode_number)
+    previous = document.setdefault("episodes", {}).get(key, {})
+    payload = asdict(result)
+    payload["attempts"] = max(result.attempts, int(previous.get("attempts", 0)))
+    payload["output_sha256"] = (result.output_hashes or {}).get("sha256")
+    document["episodes"][key] = payload
+    save_job(job_path, document)
+
+
+def episode_result_from_checkpoint(state: dict[str, Any]) -> EpisodeResult:
+    payload = {key: value for key, value in state.items() if key in EpisodeResult.__dataclass_fields__}
+    payload["source_probe"] = [
+        item if isinstance(item, ProbeInfo) else ProbeInfo(**item) for item in payload.get("source_probe", [])
+    ]
+    output_probe = payload.get("output_probe")
+    if isinstance(output_probe, dict):
+        payload["output_probe"] = ProbeInfo(**output_probe)
+    return EpisodeResult(**payload)
 
 
 def ffprobe_json(path: Path) -> dict[str, Any]:
@@ -239,6 +292,21 @@ def probe_video(path: Path) -> ProbeInfo:
     return info
 
 
+def full_source_segment(path: Path) -> SourceSegment:
+    info = probe_video(path)
+    if info.duration_s is None or info.duration_s <= 0:
+        raise ValueError(f"source has no readable duration: {path}")
+    return SourceSegment(str(path), 0.0, info.duration_s)
+
+
+def is_full_source_segment(segment: SourceSegment, source_duration_s: float | None) -> bool:
+    return bool(
+        source_duration_s is not None
+        and segment.start_s <= 0.001
+        and abs(segment.end_s - source_duration_s) <= 0.05
+    )
+
+
 def atempo_chain(speed: float) -> str:
     if speed <= 0:
         raise ValueError("speed must be greater than zero")
@@ -271,6 +339,100 @@ def make_concat_input(sources: list[Path], temp_dir: Path, logger: BatchLogger, 
     logger.line(f"Episode {episode:03d}: concatenating {len(sources)} authorized source files")
     run(["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", str(concat_list), "-c", "copy", str(concat_input)], check=True)
     return concat_input
+
+
+def _intermediate_video_chain(args: argparse.Namespace) -> str:
+    return (
+        f"scale={args.width}:{args.height}:force_original_aspect_ratio=increase,"
+        f"crop={args.width}:{args.height},fps=30,setsar=1,format=yuv420p"
+    )
+
+
+def encode_intermediate_segment(
+    segment: SourceSegment,
+    output_path: Path,
+    source_probe: ProbeInfo,
+    args: argparse.Namespace,
+) -> None:
+    if segment.end_s <= segment.start_s:
+        raise ValueError(f"invalid source segment: {segment}")
+    duration = segment.end_s - segment.start_s
+    video_filter = (
+        f"[0:v]trim=start={segment.start_s:.6f}:end={segment.end_s:.6f},"
+        f"setpts=PTS-STARTPTS,{_intermediate_video_chain(args)}[v]"
+    )
+    command = ["ffmpeg", "-y", "-i", segment.path]
+    if source_probe.has_audio:
+        audio_filter = (
+            f"[0:a]atrim=start={segment.start_s:.6f}:end={segment.end_s:.6f},"
+            "asetpts=PTS-STARTPTS,aresample=48000[a]"
+        )
+    else:
+        command.extend(
+            [
+                "-f",
+                "lavfi",
+                "-t",
+                f"{duration:.6f}",
+                "-i",
+                "anullsrc=channel_layout=stereo:sample_rate=48000",
+            ]
+        )
+        audio_filter = f"[1:a]atrim=duration={duration:.6f},asetpts=PTS-STARTPTS[a]"
+    command.extend(
+        [
+            "-filter_complex",
+            f"{video_filter};{audio_filter}",
+            "-map",
+            "[v]",
+            "-map",
+            "[a]",
+            "-c:v",
+            "libx264",
+            "-preset",
+            args.preset,
+            "-crf",
+            "18",
+            "-c:a",
+            "aac",
+            "-b:a",
+            args.audio_bitrate,
+            "-ar",
+            "48000",
+            "-ac",
+            "2",
+            "-movflags",
+            "+faststart",
+            str(output_path),
+        ]
+    )
+    run(command, check=True)
+
+
+def materialize_episode_input(
+    job: EpisodeJob,
+    temp_dir: Path,
+    logger: BatchLogger,
+    args: argparse.Namespace,
+) -> Path:
+    probes = {path: probe_video(path) for path in job.source_paths}
+    if len(job.segments) == 1:
+        segment = job.segments[0]
+        source_path = Path(segment.path)
+        if is_full_source_segment(segment, probes[source_path].duration_s):
+            return source_path
+
+    parts: list[Path] = []
+    for index, segment in enumerate(job.segments, start=1):
+        source_path = Path(segment.path)
+        part = temp_dir / f"episode-{job.output_episode:03d}-part-{index:03d}.mp4"
+        logger.line(
+            f"Episode {job.output_episode:03d}: segment {index:03d} "
+            f"{source_path.name} {segment.start_s:.3f}-{segment.end_s:.3f}s"
+        )
+        encode_intermediate_segment(segment, part, probes[source_path], args)
+        parts.append(part)
+    return make_concat_input(parts, temp_dir, logger, job.output_episode)
 
 
 def encode_episode(input_path: Path, output_path: Path, source_probe: ProbeInfo, args: argparse.Namespace) -> None:
@@ -569,6 +731,12 @@ def require_core_tools(install_missing: bool) -> None:
 
 
 def build_jobs(args: argparse.Namespace) -> list[EpisodeJob]:
+    if getattr(args, "job_document", None) is not None:
+        jobs = parse_episode_plan(args.job_document)
+        if not jobs:
+            raise SystemExit("Job file has no episode plan. Run remaster_job.py plan first.")
+        return sorted(jobs, key=lambda item: item.output_episode)
+
     videos = discover_videos(args.source_root)
     if not videos:
         raise SystemExit(f"No source videos found under {args.source_root}")
@@ -578,23 +746,28 @@ def build_jobs(args: argparse.Namespace) -> list[EpisodeJob]:
         jobs = parse_mapping_csv(args.mapping_csv, args.source_root, episode_index)
     else:
         selected = videos[: args.limit] if args.limit else videos
-        jobs = [EpisodeJob(output_episode=args.episode_start + index, sources=[path]) for index, path in enumerate(selected)]
+        jobs = [
+            EpisodeJob(output_episode=args.episode_start + index, segments=[full_source_segment(path)])
+            for index, path in enumerate(selected)
+        ]
     return sorted(jobs, key=lambda item: item.output_episode)
 
 
-def safe_output_root(path: Path, force: bool, dry_run: bool) -> None:
-    if path.exists() and any(path.iterdir()) and not force and not dry_run:
+def safe_output_root(path: Path, force: bool, dry_run: bool, job_mode: bool = False) -> None:
+    if path.exists() and any(path.iterdir()) and not force and not dry_run and not job_mode:
         raise SystemExit(f"Output root is not empty: {path}. Use --force or choose a new folder.")
     path.mkdir(parents=True, exist_ok=True)
 
 
-def parse_args() -> argparse.Namespace:
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Build an authorized short-drama release pack with local QC reports.")
-    parser.add_argument("source_root", type=Path, help="Folder containing authorized source videos.")
-    parser.add_argument("--output-root", type=Path, required=True, help="Release-pack output folder.")
+    parser.add_argument("source_root", type=Path, nargs="?", help="Folder containing authorized source videos.")
+    parser.add_argument("--output-root", type=Path, help="Release-pack output folder.")
     parser.add_argument("--source-series", default="Source Series")
-    parser.add_argument("--output-series", required=True)
-    parser.add_argument("--rights-status", required=True, choices=["owned", "licensed", "client-provided", "authorized"])
+    parser.add_argument("--output-series")
+    parser.add_argument("--rights-status", choices=["owned", "licensed", "client-provided", "authorized"])
+    parser.add_argument("--job-file", type=Path, help="Durable job JSON created by remaster_job.py.")
+    parser.add_argument("--resume", action="store_true", help="Skip hash-matching episodes that already passed QC.")
     parser.add_argument("--mapping-csv", type=Path, help="CSV with output_episode and sources/source_paths columns.")
     parser.add_argument("--episode-start", type=int, default=1)
     parser.add_argument("--limit", type=int)
@@ -617,18 +790,60 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--force", action="store_true")
     parser.add_argument("--keep-temp", action="store_true")
-    return parser.parse_args()
+    args = parser.parse_args(argv)
+    if not args.job_file:
+        missing = [
+            name
+            for name, value in (
+                ("source_root", args.source_root),
+                ("--output-root", args.output_root),
+                ("--output-series", args.output_series),
+                ("--rights-status", args.rights_status),
+            )
+            if value is None
+        ]
+        if missing:
+            parser.error(f"legacy mode requires: {', '.join(missing)}")
+    return args
+
+
+def apply_job_document(args: argparse.Namespace, document: dict[str, Any]) -> argparse.Namespace:
+    profile = document.get("profile", {})
+    enhancements = document.get("enhancements", {})
+    args.source_root = Path(document["source_root"])
+    args.output_root = Path(document["output_root"])
+    args.source_series = document["source_series"]
+    args.output_series = document["output_series"]
+    args.rights_status = document["rights_status"]
+    args.episode_start = int(document.get("episode_start", 1))
+    args.limit = document.get("source_limit")
+    args.width = int(profile.get("width", args.width))
+    args.height = int(profile.get("height", args.height))
+    args.speed = float(profile.get("speed", args.speed))
+    args.video_bitrate = profile.get("video_bitrate", args.video_bitrate)
+    args.audio_bitrate = profile.get("audio_bitrate", args.audio_bitrate)
+    args.maxrate = profile.get("maxrate", args.maxrate)
+    args.bufsize = profile.get("bufsize", args.bufsize)
+    args.platform = document.get("platform", args.platform)
+    args.account = document.get("account", args.account)
+    args.skip_covers = not bool(enhancements.get("covers", True))
+    args.job_document = document
+    return args
 
 
 def main() -> int:
     args = parse_args()
+    args.job_document = None
+    if args.job_file:
+        args.job_file = args.job_file.expanduser().resolve()
+        args = apply_job_document(args, load_job(args.job_file))
     args.source_root = args.source_root.resolve()
     args.output_root = args.output_root.resolve()
     if not args.source_root.exists():
         raise SystemExit(f"Source root does not exist: {args.source_root}")
 
     require_core_tools(args.install_missing)
-    safe_output_root(args.output_root, args.force, args.dry_run)
+    safe_output_root(args.output_root, args.force, args.dry_run, job_mode=args.job_file is not None)
 
     videos_dir = args.output_root / "videos"
     covers_dir = args.output_root / "covers"
@@ -683,68 +898,85 @@ def main() -> int:
 
     try:
         for job in jobs:
-            result = EpisodeResult(
-                episode_number=job.output_episode,
-                sources=[str(path) for path in job.sources],
-                output_path=None,
-                status="planned" if args.dry_run else "started",
-                qc_status="not_run",
-            )
-            logger.line(
-                f"Remaster: {', '.join(path.name for path in job.sources)} -> "
-                f"{args.output_series} episode {job.output_episode:03d}"
-            )
-
-            try:
-                result.source_hashes = [hash_file(path) for path in job.sources]
-                result.source_probe = [probe_video(path) for path in job.sources]
-            except Exception as exc:
-                result.status = "failed"
-                result.problems.append(str(exc))
-                logger.line(f"Episode {job.output_episode:03d}: source probe failed: {exc}")
-                manifest["episodes"].append(asdict(result))
-                continue
-
-            output_path = videos_dir / f"{slugify(args.output_series)}-episode-{job.output_episode:03d}.mp4"
-            result.output_path = str(output_path)
-            result.title_candidates = title_candidates(args.output_series, job.output_episode)
-
-            if args.dry_run:
-                result.status = "planned"
-                manifest["episodes"].append(asdict(result))
-                continue
-
-            try:
-                concat_input = make_concat_input(job.sources, temp_dir, logger, job.output_episode)
-                concat_probe = probe_video(concat_input)
+            checkpoint = None
+            if args.resume and args.job_file:
+                checkpoint = load_job(args.job_file).get("episodes", {}).get(str(job.output_episode))
+            if should_skip_episode(checkpoint):
+                result = episode_result_from_checkpoint(checkpoint)
+                logger.line(f"Episode {job.output_episode:03d}: checkpoint passed; skipping encode")
+            else:
+                result = EpisodeResult(
+                    episode_number=job.output_episode,
+                    sources=[str(path) for path in job.source_paths],
+                    output_path=None,
+                    status="planned" if args.dry_run else "started",
+                    qc_status="not_run",
+                )
                 logger.line(
-                    f"Output {args.width}x{args.height}, {args.speed:.3f}x; "
-                    f"target bitrate {args.video_bitrate}; metadata normalized for authorized release"
+                    f"Remaster: {', '.join(path.name for path in job.source_paths)} -> "
+                    f"{args.output_series} episode {job.output_episode:03d}"
                 )
-                encode_episode(concat_input, output_path, concat_probe, args)
-                result.output_hashes = hash_file(output_path)
-                result.output_probe = probe_video(output_path)
-                result.qc_status, qc_problems = qc_status(result.output_probe, args)
-                result.problems.extend(qc_problems)
-                result.local_difference = local_difference_report(
-                    result.source_hashes,
-                    result.output_hashes,
-                    result.source_probe,
-                    result.output_probe,
-                )
-                if result.qc_status == "pass" and result.local_difference.get("status") == "pass":
-                    result.status = "complete"
-                    logger.line(
-                        f"QC pass; duration: {result.output_probe.duration_s:.2f}s; "
-                        f"resolution: {result.output_probe.width}x{result.output_probe.height}; "
-                        f"bitrate: {result.output_probe.bitrate_mbps:.2f}Mbps; "
-                        f"size: {result.output_probe.size_mb:.2f}MB"
-                    )
-                else:
-                    result.status = "failed"
-                    logger.line(f"Episode {job.output_episode:03d}: QC/local difference failed")
 
-                if not args.skip_covers and result.output_probe:
+                try:
+                    result.source_hashes = [hash_file(path) for path in job.source_paths]
+                    result.source_probe = [probe_video(path) for path in job.source_paths]
+                except Exception as exc:
+                    result.status = "failed"
+                    result.qc_status = "fail"
+                    result.problems.append(str(exc))
+                    logger.line(f"Episode {job.output_episode:03d}: source probe failed: {exc}")
+                    if args.job_file:
+                        update_episode_checkpoint(args.job_file, result)
+                    manifest["episodes"].append(asdict(result))
+                    continue
+
+                output_path = videos_dir / f"{slugify(args.output_series)}-episode-{job.output_episode:03d}.mp4"
+                result.output_path = str(output_path)
+                result.title_candidates = title_candidates(args.output_series, job.output_episode)
+
+                if args.dry_run:
+                    result.status = "planned"
+                else:
+                    for attempt in range(1, 3):
+                        result.attempts = attempt
+                        try:
+                            episode_input = materialize_episode_input(job, temp_dir, logger, args)
+                            input_probe = probe_video(episode_input)
+                            logger.line(
+                                f"Output {args.width}x{args.height}, {args.speed:.3f}x; "
+                                f"target bitrate {args.video_bitrate}; metadata normalized for authorized release"
+                            )
+                            encode_episode(episode_input, output_path, input_probe, args)
+                            result.output_hashes = hash_file(output_path)
+                            result.output_probe = probe_video(output_path)
+                            result.qc_status, qc_problems = qc_status(result.output_probe, args)
+                            result.problems.extend(qc_problems)
+                            result.local_difference = local_difference_report(
+                                result.source_hashes,
+                                result.output_hashes,
+                                result.source_probe,
+                                result.output_probe,
+                            )
+                            if result.qc_status != "pass" or result.local_difference.get("status") != "pass":
+                                raise RuntimeError("QC/local difference failed")
+                            result.status = "complete"
+                            logger.line(
+                                f"QC pass; duration: {result.output_probe.duration_s:.2f}s; "
+                                f"resolution: {result.output_probe.width}x{result.output_probe.height}; "
+                                f"bitrate: {result.output_probe.bitrate_mbps:.2f}Mbps; "
+                                f"size: {result.output_probe.size_mb:.2f}MB"
+                            )
+                            break
+                        except Exception as exc:
+                            result.status = "failed"
+                            result.qc_status = "fail"
+                            result.problems.append(str(exc))
+                            if attempt < 2:
+                                logger.line(f"Episode {job.output_episode:03d}: attempt {attempt} failed; retrying: {exc}")
+                            else:
+                                logger.line(f"Episode {job.output_episode:03d}: failed after {attempt} attempts: {exc}")
+
+                if result.status == "complete" and not args.skip_covers and result.output_probe:
                     covers = extract_cover_candidates(
                         output_path,
                         covers_dir,
@@ -754,11 +986,9 @@ def main() -> int:
                     )
                     result.cover_candidates = [str(path) for path in covers]
                     all_cover_paths.extend(covers[:1])
-            except Exception as exc:
-                result.status = "failed"
-                result.qc_status = "fail"
-                result.problems.append(str(exc))
-                logger.line(f"Episode {job.output_episode:03d}: failed: {exc}")
+
+                if args.job_file:
+                    update_episode_checkpoint(args.job_file, result)
 
             cover_path = result.cover_candidates[0] if result.cover_candidates else ""
             release_rows.append(
