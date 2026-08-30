@@ -13,12 +13,23 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
+from delivery_profiles import load_delivery_profile
+
 
 SCHEMA_VERSION = 1
 RIGHTS_STATUSES = {"owned", "licensed", "client-provided", "authorized"}
 PLANNING_MODES = {"one-to-one", "target-duration", "mapping-csv"}
 JOB_STATES = {"draft", "ready", "running", "needs_input", "failed", "complete"}
 MEDIA_INVALIDATION_FIELDS = {"source_root", "output_series", "episode_start", "source_limit"}
+ENCODE_INVALIDATION_FIELDS = {"execution.encoder"}
+READINESS_INVALIDATION_PREFIXES = (
+    "delivery_profile.",
+    "enhancements.",
+    "rights_",
+    "attribution.",
+    "disclosure.",
+    "publishing.",
+)
 
 
 @dataclass(frozen=True)
@@ -53,6 +64,9 @@ def new_job(output_root: Path) -> dict[str, Any]:
         "source_series": None,
         "output_series": None,
         "rights_status": None,
+        "rights_evidence": "",
+        "attribution": {"required": False, "text": "", "approved": False},
+        "disclosure": {"ai_content": None, "ai_label": None},
         "planning": {
             "mode": None,
             "target_duration_s": 60.0,
@@ -72,11 +86,22 @@ def new_job(output_root: Path) -> dict[str, Any]:
             "maxrate": "7500k",
             "bufsize": "13000k",
         },
+        "delivery_profile": {"name": "video-channels", "version": 1},
+        "execution": {
+            "workers": "auto",
+            "enhancement_workers": 1,
+            "encoder": "auto",
+            "cache": True,
+        },
         "enhancements": {
             "covers": True,
             "subtitles": False,
             "metadata": True,
             "evidence": True,
+            "copy": False,
+            "narration": False,
+            "mix_narration": False,
+            "editorial_recommendations": True,
         },
         "platform": "WeChat Channels",
         "account": "",
@@ -87,7 +112,72 @@ def new_job(output_root: Path) -> dict[str, Any]:
         "episodes": {},
         "last_error": None,
         "needs_input": None,
+        "release_readiness": {"status": "pending", "report": None},
     }
+
+
+def normalize_job(job: dict[str, Any]) -> dict[str, Any]:
+    updated = copy.deepcopy(job)
+    answered = set(updated.get("answered_fields", []))
+
+    if "delivery_profile" not in updated:
+        updated["delivery_profile"] = {"name": "video-channels", "version": 1}
+        answered.add("delivery_profile.name")
+    else:
+        updated["delivery_profile"].setdefault("name", "video-channels")
+        updated["delivery_profile"].setdefault("version", 1)
+
+    execution_defaults = {
+        "workers": "auto",
+        "enhancement_workers": 1,
+        "encoder": "auto",
+        "cache": True,
+    }
+    if "execution" not in updated:
+        updated["execution"] = copy.deepcopy(execution_defaults)
+        answered.update(f"execution.{key}" for key in execution_defaults)
+    else:
+        for key, value in execution_defaults.items():
+            if key not in updated["execution"]:
+                updated["execution"][key] = value
+                answered.add(f"execution.{key}")
+
+    enhancement_defaults = {
+        "covers": True,
+        "subtitles": False,
+        "metadata": True,
+        "evidence": True,
+        "copy": False,
+        "narration": False,
+        "mix_narration": False,
+        "editorial_recommendations": True,
+    }
+    enhancements = updated.setdefault("enhancements", {})
+    for key, value in enhancement_defaults.items():
+        if key not in enhancements:
+            enhancements[key] = value
+            answered.add(f"enhancements.{key}")
+
+    if "rights_evidence" not in updated:
+        updated["rights_evidence"] = ""
+        answered.add("rights_evidence")
+    if "attribution" not in updated:
+        updated["attribution"] = {"required": False, "text": "", "approved": False}
+        answered.add("attribution.required")
+    else:
+        updated["attribution"].setdefault("required", False)
+        updated["attribution"].setdefault("text", "")
+        updated["attribution"].setdefault("approved", False)
+    if "disclosure" not in updated:
+        updated["disclosure"] = {"ai_content": False, "ai_label": "not-applicable"}
+        answered.add("disclosure.ai_content")
+    else:
+        updated["disclosure"].setdefault("ai_content", None)
+        updated["disclosure"].setdefault("ai_label", None)
+
+    updated.setdefault("release_readiness", {"status": "pending", "report": None})
+    updated["answered_fields"] = list(dict.fromkeys(updated.get("answered_fields", []) + sorted(answered)))
+    return updated
 
 
 def load_job(path: Path) -> dict[str, Any]:
@@ -96,7 +186,7 @@ def load_job(path: Path) -> dict[str, Any]:
         raise ValueError(f"unsupported job schema: {payload.get('schema_version')}")
     if payload.get("status") not in JOB_STATES:
         raise ValueError(f"invalid job status: {payload.get('status')}")
-    return payload
+    return normalize_job(payload)
 
 
 def save_job(path: Path, job: dict[str, Any]) -> None:
@@ -177,12 +267,24 @@ def _bitrate(value: str) -> str:
     return normalized
 
 
+def _workers(value: str) -> str | int:
+    normalized = value.strip().lower()
+    if normalized == "auto":
+        return normalized
+    return _positive_int(value, "worker count")
+
+
 def _field_parser(field: str) -> Callable[[str], Any]:
     parsers: dict[str, Callable[[str], Any]] = {
         "source_root": _existing_directory,
         "source_series": lambda value: _require_text(value, "source series"),
         "output_series": lambda value: _require_text(value, "output series"),
         "rights_status": lambda value: _choice(value, RIGHTS_STATUSES, "rights status"),
+        "rights_evidence": lambda value: value.strip(),
+        "attribution.required": _boolean,
+        "attribution.text": lambda value: _require_text(value, "attribution text"),
+        "disclosure.ai_content": _boolean,
+        "disclosure.ai_label": lambda value: _choice(value, {"planned", "applied"}, "AI label"),
         "planning.mode": lambda value: _choice(value, PLANNING_MODES, "planning mode"),
         "planning.target_duration_s": lambda value: _positive_float(value, "target duration"),
         "planning.min_duration_s": lambda value: _positive_float(value, "minimum duration"),
@@ -196,10 +298,19 @@ def _field_parser(field: str) -> Callable[[str], Any]:
         "profile.speed": lambda value: _positive_float(value, "speed"),
         "profile.video_bitrate": _bitrate,
         "profile.audio_bitrate": _bitrate,
+        "delivery_profile.name": lambda value: load_delivery_profile(value).name,
+        "execution.workers": _workers,
+        "execution.enhancement_workers": lambda value: _positive_int(value, "enhancement worker count"),
+        "execution.encoder": lambda value: _choice(value, {"auto", "software", "hardware"}, "encoder mode"),
+        "execution.cache": _boolean,
         "enhancements.covers": _boolean,
         "enhancements.subtitles": _boolean,
         "enhancements.metadata": _boolean,
         "enhancements.evidence": _boolean,
+        "enhancements.copy": _boolean,
+        "enhancements.narration": _boolean,
+        "enhancements.mix_narration": _boolean,
+        "enhancements.editorial_recommendations": _boolean,
         "platform": lambda value: _require_text(value, "platform"),
         "account": lambda value: value.strip(),
         "publishing.prepare": _boolean,
@@ -225,13 +336,19 @@ def set_job_field(job: dict[str, Any], field: str, raw_value: str) -> dict[str, 
     updated = copy.deepcopy(job)
     parsed = _field_parser(field)(raw_value)
     _set_nested(updated, field, parsed)
+    if field == "disclosure.ai_content" and parsed is False:
+        _set_nested(updated, "disclosure.ai_label", "not-applicable")
+    elif field == "disclosure.ai_content" and parsed is True:
+        _set_nested(updated, "disclosure.ai_label", None)
     answered = updated.setdefault("answered_fields", [])
     if field not in answered:
         answered.append(field)
-    if field in MEDIA_INVALIDATION_FIELDS or field.startswith(("planning.", "profile.")):
+    if field in MEDIA_INVALIDATION_FIELDS or field in ENCODE_INVALIDATION_FIELDS or field.startswith(("planning.", "profile.")):
         updated["source_inventory"] = []
         updated["episode_plan"] = []
         updated["episodes"] = {}
+    if field.startswith(READINESS_INVALIDATION_PREFIXES) or field in {"rights_status", "account", "platform"}:
+        updated["release_readiness"] = {"status": "pending", "report": None}
     updated["status"] = "draft"
     updated["last_error"] = None
     updated["needs_input"] = None
@@ -247,8 +364,23 @@ def _question_table(job: dict[str, Any]) -> list[Question]:
         Question("source_series", "Source series name"),
         Question("output_series", "Output series name"),
         Question("rights_status", "Rights status", choices=tuple(sorted(RIGHTS_STATUSES))),
-        Question("planning.mode", "Episode planning mode", choices=("target-duration", "one-to-one", "mapping-csv")),
+        Question("rights_evidence", "Rights evidence path, URL, reference, or leave blank", ""),
+        Question("attribution.required", "Is attribution required", "no"),
     ]
+    if job.get("attribution", {}).get("required"):
+        questions.append(Question("attribution.text", "Required attribution text"))
+    questions.extend(
+        [
+            Question("disclosure.ai_content", "Does the content include AI-generated material", choices=("yes", "no")),
+        ]
+    )
+    if job.get("disclosure", {}).get("ai_content"):
+        questions.append(Question("disclosure.ai_label", "AI content label status", "planned", ("planned", "applied")))
+    questions.extend(
+        [
+        Question("planning.mode", "Episode planning mode", choices=("target-duration", "one-to-one", "mapping-csv")),
+        ]
+    )
     if mode == "target-duration":
         questions.extend(
             [
@@ -264,6 +396,7 @@ def _question_table(job: dict[str, Any]) -> list[Question]:
             Question("episode_start", "Starting output episode", "1"),
             Question("source_limit", "Maximum source files or all", "all"),
             Question("profile.mode", "Use default or custom delivery profile", "default", ("default", "custom")),
+            Question("delivery_profile.name", "Release-readiness delivery profile", "video-channels", ("video-channels",)),
         ]
     )
     if profile_mode == "custom":
@@ -282,6 +415,19 @@ def _question_table(job: dict[str, Any]) -> list[Question]:
             Question("enhancements.subtitles", "Generate subtitle drafts", "no"),
             Question("enhancements.metadata", "Generate release metadata drafts", "yes"),
             Question("enhancements.evidence", "Generate evidence artifacts", "yes"),
+            Question("enhancements.copy", "Generate editable release copy", "no"),
+            Question("enhancements.narration", "Generate narration assets", "no"),
+        ]
+    )
+    if job.get("enhancements", {}).get("narration"):
+        questions.append(Question("enhancements.mix_narration", "Mix approved narration into the video", "no"))
+    questions.extend(
+        [
+            Question("enhancements.editorial_recommendations", "Generate scene and pacing recommendations", "yes"),
+            Question("execution.workers", "Video worker count or auto", "auto"),
+            Question("execution.enhancement_workers", "Enhancement worker count", "1"),
+            Question("execution.encoder", "Encoder mode", "auto", ("auto", "software", "hardware")),
+            Question("execution.cache", "Enable validated stage cache", "yes"),
             Question("platform", "Target platform", "WeChat Channels"),
             Question("account", "Publishing account label, or leave blank", ""),
             Question("publishing.prepare", "Prepare publishing tasks", "no"),
@@ -321,6 +467,24 @@ def validate_job(job: dict[str, Any], require_ready: bool = False) -> list[str]:
         mapping = job.get("planning", {}).get("mapping_csv")
         if not mapping or not Path(mapping).is_file():
             problems.append("mapping CSV does not exist")
+    delivery = job.get("delivery_profile", {})
+    try:
+        load_delivery_profile(str(delivery.get("name", "")), int(delivery.get("version", 1)))
+    except (TypeError, ValueError) as exc:
+        problems.append(str(exc))
+    execution = job.get("execution", {})
+    if execution.get("encoder") not in {"auto", "software", "hardware"}:
+        problems.append("invalid encoder mode")
+    for field in ("workers", "enhancement_workers"):
+        value = execution.get(field)
+        if value != "auto" and (not isinstance(value, int) or value <= 0):
+            problems.append(f"invalid {field.replace('_', ' ')}")
+    disclosure = job.get("disclosure", {})
+    if disclosure.get("ai_content") is True and disclosure.get("ai_label") not in {"planned", "applied"}:
+        problems.append("AI content requires a planned or applied label")
+    attribution = job.get("attribution", {})
+    if attribution.get("required") and not str(attribution.get("text", "")).strip():
+        problems.append("required attribution text is missing")
     if require_ready:
         question = next_question(job)
         if question is not None:

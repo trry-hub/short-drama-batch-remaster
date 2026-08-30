@@ -13,6 +13,7 @@ from remaster_job_core import (  # noqa: E402
     load_job,
     new_job,
     next_question,
+    normalize_job,
     save_job,
     set_job_field,
     validate_job,
@@ -20,6 +21,41 @@ from remaster_job_core import (  # noqa: E402
 
 
 class RemasterJobCoreTests(unittest.TestCase):
+    def test_old_job_gets_backward_compatible_optimization_defaults(self) -> None:
+        old = new_job(ROOT / "work" / "legacy")
+        for field in ("delivery_profile", "execution", "disclosure", "release_readiness"):
+            old.pop(field, None)
+        old["enhancements"].pop("copy", None)
+        old["enhancements"].pop("narration", None)
+
+        normalized = normalize_job(old)
+
+        self.assertEqual(normalized["delivery_profile"], {"name": "video-channels", "version": 1})
+        self.assertEqual(normalized["execution"]["workers"], "auto")
+        self.assertEqual(normalized["execution"]["enhancement_workers"], 1)
+        self.assertEqual(normalized["execution"]["encoder"], "auto")
+        self.assertTrue(normalized["execution"]["cache"])
+        self.assertFalse(normalized["disclosure"]["ai_content"])
+        self.assertEqual(normalized["release_readiness"]["status"], "pending")
+
+    def test_new_job_requires_ai_content_decision(self) -> None:
+        job = new_job(ROOT / "work" / "release")
+        self.assertIsNone(job["disclosure"]["ai_content"])
+        questions = [question.field for question in __import__("remaster_job_core")._question_table(job)]
+        self.assertIn("disclosure.ai_content", questions)
+
+    def test_worker_count_preserves_plan_but_encoder_change_invalidates_it(self) -> None:
+        job = new_job(ROOT / "work" / "release")
+        job["episode_plan"] = [{"output_episode": 1, "segments": []}]
+        job["episodes"] = {"1": {"status": "complete", "qc_status": "pass"}}
+        updated = set_job_field(job, "execution.workers", "3")
+        self.assertEqual(updated["execution"]["workers"], 3)
+        self.assertEqual(updated["episode_plan"], job["episode_plan"])
+        changed_encoder = set_job_field(updated, "execution.encoder", "software")
+        self.assertEqual(changed_encoder["execution"]["encoder"], "software")
+        self.assertEqual(changed_encoder["episode_plan"], [])
+        self.assertEqual(changed_encoder["episodes"], {})
+
     def test_new_job_is_draft_and_uses_output_job_folder(self) -> None:
         with self.subTest("new job defaults"):
             root = ROOT / "work" / "test-output"
@@ -54,6 +90,9 @@ class RemasterJobCoreTests(unittest.TestCase):
             job = set_job_field(job, "source_series", "Source")
             job = set_job_field(job, "output_series", "Output")
             job = set_job_field(job, "rights_status", "owned")
+            job = set_job_field(job, "rights_evidence", "")
+            job = set_job_field(job, "attribution.required", "no")
+            job = set_job_field(job, "disclosure.ai_content", "no")
             job = set_job_field(job, "planning.mode", "target-duration")
             self.assertEqual(next_question(job).field, "planning.target_duration_s")
 
@@ -69,6 +108,9 @@ class RemasterJobCoreTests(unittest.TestCase):
                 ("source_series", "Source"),
                 ("output_series", "Output"),
                 ("rights_status", "owned"),
+                ("rights_evidence", ""),
+                ("attribution.required", "no"),
+                ("disclosure.ai_content", "no"),
                 ("planning.mode", "mapping-csv"),
             ):
                 job = set_job_field(job, field, value)
