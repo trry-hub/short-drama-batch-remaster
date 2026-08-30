@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import copy
 import json
 import os
 import subprocess
@@ -250,6 +251,52 @@ def _tool_check() -> tuple[bool, str]:
         return False, proc.stdout.strip() or "core dependencies are unavailable"
 
 
+def invalidate_changed_source_checkpoints(
+    job: dict[str, Any], changed_paths: set[str]
+) -> tuple[dict[str, Any], list[int]]:
+    updated = copy.deepcopy(job)
+    affected: list[int] = []
+    for planned in updated.get("episode_plan", []):
+        if any(segment.get("path") in changed_paths for segment in planned.get("segments", [])):
+            episode = int(planned["output_episode"])
+            updated.setdefault("episodes", {}).pop(str(episode), None)
+            affected.append(episode)
+    return updated, sorted(affected)
+
+
+def revalidate_source_inventory(job_path: Path) -> tuple[str | None, list[int]]:
+    job = load_job(job_path)
+    changed_paths: set[str] = set()
+    for item in job.get("source_inventory", []):
+        path = Path(item["path"])
+        if not path.is_file():
+            return f"source file is missing: {path}; run plan again", []
+        stat = path.stat()
+        if stat.st_size == item.get("size") and stat.st_mtime_ns == item.get("mtime_ns"):
+            continue
+        current_hash = hash_file(path)["sha256"]
+        if current_hash == item.get("sha256"):
+            item["size"] = stat.st_size
+            item["mtime_ns"] = stat.st_mtime_ns
+            continue
+        probe = probe_video(path)
+        previous_duration = float(item.get("duration_s") or 0.0)
+        if probe.duration_s is None or abs(probe.duration_s - previous_duration) > 0.05:
+            return f"source duration changed: {path}; run plan again and confirm the new plan", []
+        changed_paths.add(str(path))
+        item["size"] = stat.st_size
+        item["mtime_ns"] = stat.st_mtime_ns
+        item["sha256"] = current_hash
+
+    updated, affected = invalidate_changed_source_checkpoints(job, changed_paths)
+    if changed_paths:
+        updated["source_inventory"] = job["source_inventory"]
+        save_job(job_path, updated)
+    elif job != load_job(job_path):
+        save_job(job_path, job)
+    return None, affected
+
+
 def execute_job(job_path: Path, *, resume: bool, confirmed: bool) -> int:
     if not confirmed:
         print_json({"ok": False, "error": "run and resume require --confirm"})
@@ -260,6 +307,12 @@ def execute_job(job_path: Path, *, resume: bool, confirmed: bool) -> int:
         message = "; ".join(problems)
         set_status(job_path, "needs_input", error=message, needs_input=message)
         print_json({"ok": False, "status": "needs_input", "error": message})
+        return EXIT_NEEDS_INPUT
+
+    source_error, invalidated = revalidate_source_inventory(job_path)
+    if source_error:
+        set_status(job_path, "needs_input", error=source_error, needs_input=source_error)
+        print_json({"ok": False, "status": "needs_input", "error": source_error})
         return EXIT_NEEDS_INPUT
 
     tools_ok, tool_error = _tool_check()
@@ -292,6 +345,7 @@ def execute_job(job_path: Path, *, resume: bool, confirmed: bool) -> int:
             "status": updated["status"],
             "job_path": str(job_path),
             "output_root": updated["output_root"],
+            "invalidated_episodes": invalidated,
         }
     )
     return exit_code

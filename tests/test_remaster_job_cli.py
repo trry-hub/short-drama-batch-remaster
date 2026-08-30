@@ -14,6 +14,7 @@ SCRIPTS = ROOT / "scripts"
 sys.path.insert(0, str(SCRIPTS))
 
 from remaster_job_core import job_path_for_output, new_job, save_job  # noqa: E402
+from remaster_job import invalidate_changed_source_checkpoints  # noqa: E402
 
 
 def run_cli(*args: str, input_text: str = "", env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
@@ -84,6 +85,21 @@ class RemasterJobCliTests(unittest.TestCase):
             self.assertEqual(result.returncode, 2)
             payload = json.loads(run_cli("status", "--job", str(job_path), "--json").stdout)
             self.assertIsNone(payload["job"]["rights_status"])
+
+    def test_changed_source_invalidates_only_affected_episode_checkpoints(self) -> None:
+        job = new_job(Path("/tmp/release"))
+        job["episode_plan"] = [
+            {"output_episode": 1, "segments": [{"path": "/src/a.mp4", "start_s": 0.0, "end_s": 10.0}]},
+            {"output_episode": 2, "segments": [{"path": "/src/b.mp4", "start_s": 0.0, "end_s": 10.0}]},
+        ]
+        job["episodes"] = {
+            "1": {"status": "complete", "qc_status": "pass"},
+            "2": {"status": "complete", "qc_status": "pass"},
+        }
+        updated, affected = invalidate_changed_source_checkpoints(job, {"/src/a.mp4"})
+        self.assertEqual(affected, [1])
+        self.assertNotIn("1", updated["episodes"])
+        self.assertIn("2", updated["episodes"])
 
 
 if __name__ == "__main__":

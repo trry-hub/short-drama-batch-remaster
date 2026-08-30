@@ -18,6 +18,7 @@ SCHEMA_VERSION = 1
 RIGHTS_STATUSES = {"owned", "licensed", "client-provided", "authorized"}
 PLANNING_MODES = {"one-to-one", "target-duration", "mapping-csv"}
 JOB_STATES = {"draft", "ready", "running", "needs_input", "failed", "complete"}
+MEDIA_INVALIDATION_FIELDS = {"source_root", "output_series", "episode_start", "source_limit"}
 
 
 @dataclass(frozen=True)
@@ -227,6 +228,10 @@ def set_job_field(job: dict[str, Any], field: str, raw_value: str) -> dict[str, 
     answered = updated.setdefault("answered_fields", [])
     if field not in answered:
         answered.append(field)
+    if field in MEDIA_INVALIDATION_FIELDS or field.startswith(("planning.", "profile.")):
+        updated["source_inventory"] = []
+        updated["episode_plan"] = []
+        updated["episodes"] = {}
     updated["status"] = "draft"
     updated["last_error"] = None
     updated["needs_input"] = None

@@ -92,6 +92,24 @@ class RemasterJobCoreTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "rights status"):
             set_job_field(job, "rights_status", "unknown")
 
+    def test_media_setting_change_invalidates_plan_and_episode_checkpoints(self) -> None:
+        job = new_job(ROOT / "work" / "release")
+        job["episode_plan"] = [{"output_episode": 1, "segments": []}]
+        job["source_inventory"] = [{"path": "old.mp4"}]
+        job["episodes"] = {"1": {"status": "complete", "qc_status": "pass"}}
+        updated = set_job_field(job, "profile.speed", "1.1")
+        self.assertEqual(updated["episode_plan"], [])
+        self.assertEqual(updated["source_inventory"], [])
+        self.assertEqual(updated["episodes"], {})
+
+    def test_account_change_preserves_media_checkpoints(self) -> None:
+        job = new_job(ROOT / "work" / "release")
+        job["episode_plan"] = [{"output_episode": 1, "segments": []}]
+        job["episodes"] = {"1": {"status": "complete", "qc_status": "pass"}}
+        updated = set_job_field(job, "account", "channel-a")
+        self.assertEqual(updated["episode_plan"], job["episode_plan"])
+        self.assertEqual(updated["episodes"], job["episodes"])
+
 
 if __name__ == "__main__":
     unittest.main()
