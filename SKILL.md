@@ -35,19 +35,22 @@ python3 scripts/ensure_tools.py --install --features core,whisper,jianying,docs,
 
 Use the script's report to decide the tool route. If a dependency needs administrator approval, login credentials, an API key, or a platform account, stop at that step and ask for the specific missing input.
 
+For requests that mention watermark handling, reposting, deduplication, rights, attribution, or platform checks, also read [references/rights-safe-transformations.md](references/rights-safe-transformations.md) before choosing tools or writing commands.
+
 ## Default Workflow
 
 Follow the log-shaped workflow unless the user explicitly changes settings:
 
 1. **Intake and manifest**: identify source folder, source series name, output series name, episode range, source-to-output episode mapping, rights status, output root, and whether publishing is included.
-2. **Batch remaster**: for each output episode, assemble the mapped source episode(s), normalize to `1080x1920`, apply the configured `1.050x` speed change, audio adjustment, visual styling, and clean export metadata for authorized derivatives.
-3. **Encoding target**: encode toward `6500k` video bitrate, H.264/AAC MP4 unless the user requires another delivery profile.
-4. **Per-episode QC**: use `ffprobe` or equivalent to verify duration, resolution, bitrate, file size, stream presence, and readable output. Retry an encoding failure at most twice, then report the episode as failed.
-5. **Process evidence**: after the batch, generate process images/contact sheets and a machine-readable manifest that records inputs, outputs, parameters, timestamps, and QC results.
-6. **Timestamp certificate**: generate a timestamp image containing the output title, folder, generation time, manifest hash, and operator/tool note.
-7. **Cost image**: use WPS/DOCX template export when available; otherwise generate a visually simple image from the same fields. Apply configured signature/seal assets only when the user provided them or they exist in the configured cache path.
-8. **Jianying storyboard mode 2**: for the selected sample episodes, generate Jianying 5.9 drafts, split each episode into random `2-8s` micro-storyboard segments with exact total duration, write a seven-track timeline, run Whisper `small`, import subtitles, open Jianying, seek to the sidecar timestamp, zoom the timeline twice, capture one engineering screenshot per draft, then close Jianying and delete the temporary drafts.
-9. **Delivery**: return the output folder, counts, QC summary, failed items, evidence images, timestamp image, cost image, storyboard screenshots, and any publishing status.
+2. **Rights-safe transformation gate**: record whether the request involves watermark handling, attribution, reposting, or duplicate-asset management. Route only to the permitted alternatives in `references/rights-safe-transformations.md`.
+3. **Batch remaster**: for each output episode, assemble the mapped source episode(s), normalize to `1080x1920`, apply the configured `1.050x` speed change, audio adjustment, visual styling, and clean export metadata for authorized derivatives.
+4. **Encoding target**: encode toward `6500k` video bitrate, H.264/AAC MP4 unless the user requires another delivery profile.
+5. **Per-episode QC**: use `ffprobe` or equivalent to verify duration, resolution, bitrate, file size, stream presence, and readable output. Retry an encoding failure at most twice, then report the episode as failed.
+6. **Process evidence**: after the batch, generate process images/contact sheets and a machine-readable manifest that records inputs, outputs, parameters, timestamps, and QC results.
+7. **Timestamp certificate**: generate a timestamp image containing the output title, folder, generation time, manifest hash, and operator/tool note.
+8. **Cost image**: use WPS/DOCX template export when available; otherwise generate a visually simple image from the same fields. Apply configured signature/seal assets only when the user provided them or they exist in the configured cache path.
+9. **Jianying storyboard mode 2**: for the selected sample episodes, generate Jianying 5.9 drafts, split each episode into random `2-8s` micro-storyboard segments with exact total duration, write a seven-track timeline, run Whisper `small`, import subtitles, open Jianying, seek to the sidecar timestamp, zoom the timeline twice, capture one engineering screenshot per draft, then close Jianying and delete the temporary drafts.
+10. **Delivery**: return the output folder, counts, QC summary, failed items, evidence images, timestamp image, cost image, storyboard screenshots, and any publishing status.
 
 ## Tool Routing
 
@@ -81,3 +84,4 @@ Use neutral wording such as "authorized derivative metadata rewrite" or "metadat
 - If WPS is unavailable, generate the cost image via Python and note the fallback.
 - If Whisper confidence or transcript quality is poor, keep the draft but flag subtitles for review.
 - Do not publish failed-QC videos.
+- If a requested operation would remove third-party attribution, hide source identity, defeat content matching, or bypass platform enforcement, stop that operation and offer the closest permitted workflow: owned-brand replacement, attribution-preserving repost package, rights manifest, platform-spec validation, or duplicate-asset inventory.

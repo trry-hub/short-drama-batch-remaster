@@ -14,6 +14,7 @@ def main() -> int:
         ROOT / "SKILL.md",
         ROOT / "references" / "workflow.md",
         ROOT / "references" / "tooling.md",
+        ROOT / "references" / "rights-safe-transformations.md",
         ROOT / "scripts" / "ensure_tools.py",
     ]
     missing = [path for path in required if not path.exists()]

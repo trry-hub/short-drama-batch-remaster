@@ -35,6 +35,21 @@ Collect or infer these before processing:
 
 If filenames contain episode numbers, infer the mapping and show a short preview before encoding. If mapping cannot be inferred safely, ask for a CSV or plain-text mapping.
 
+## Stage 0: Rights-Safe Transformation Gate
+
+Read `references/rights-safe-transformations.md` when a request mentions watermark handling, reposting, deduplication, rights, attribution, or platform checks.
+
+Record in the manifest:
+
+- rights status;
+- source owner or provider when known;
+- allowed transformation category;
+- attribution requirements;
+- platform target;
+- whether publication is approved.
+
+Continue only with permitted transformations. Stop any operation whose purpose is to remove third-party attribution, conceal source identity, defeat content matching, or bypass platform enforcement.
+
 ## Stage 1: Episode Remaster
 
 For each output episode:
