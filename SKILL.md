@@ -11,7 +11,7 @@ Use this skill to reproduce the local short-drama batch workflow represented by 
 
 The skill is a workflow orchestrator. Use the best available local tools and installed open-source projects rather than forcing one implementation. Install missing first-use dependencies automatically when that can be done without credentials, paid accounts, or unsafe privilege escalation.
 
-For a new execution request, prefer the durable controller in `scripts/remaster_job.py`. It collects and validates inputs, plans episodes, invokes `scripts/build_release_pack.py`, persists per-episode QC checkpoints, and resumes interrupted jobs. Treat local difference reports as internal QC only; they are not a platform review guarantee.
+For a new execution request, prefer the durable controller in `scripts/remaster_job.py`. It collects and validates inputs, plans episodes, invokes `scripts/build_release_pack.py`, persists per-episode QC checkpoints, resumes interrupted jobs, generates optional creative assets, and writes release-readiness reports. Treat local difference and readiness reports as local evidence only; they are not a platform review guarantee.
 
 ## Interactive Intake and Execution
 
@@ -41,13 +41,13 @@ When chat-based local execution is unavailable, run `python3 scripts/remaster_jo
 Before starting a real batch, read [references/workflow.md](references/workflow.md). Then run:
 
 ```bash
-python3 scripts/ensure_tools.py --install --features core,vision,whisper,jianying,docs,ui
+python3 scripts/ensure_tools.py --install --features core,quality,vision,whisper,jianying,docs,ui
 ```
 
 If publishing is requested, include the publish feature:
 
 ```bash
-python3 scripts/ensure_tools.py --install --features core,vision,whisper,jianying,docs,ui,publish
+python3 scripts/ensure_tools.py --install --features core,quality,vision,whisper,jianying,docs,ui,publish
 ```
 
 Use the script's report to decide the tool route. If a dependency needs administrator approval, login credentials, an API key, or a platform account, stop at that step and ask for the specific missing input.
@@ -65,20 +65,24 @@ Follow the log-shaped workflow unless the user explicitly changes settings:
 3. **Batch remaster**: for each output episode, assemble the mapped source episode(s), normalize to `1080x1920`, apply the configured `1.050x` speed change, audio adjustment, visual styling, and clean export metadata for authorized derivatives.
 4. **Encoding target**: encode toward `6500k` video bitrate, H.264/AAC MP4 unless the user requires another delivery profile.
 5. **Per-episode QC**: use `ffprobe` or equivalent to verify duration, resolution, bitrate, file size, stream presence, and readable output. Retry an encoding failure at most twice, then report the episode as failed.
-6. **Production enhancement pack**: create or update subtitles, title/description/tag drafts, cover candidates, Video Channels validation, internal duplicate inventory, and `release_queue` files when requested or useful for publishing.
-7. **Process evidence**: after the batch, generate process images/contact sheets and a machine-readable manifest that records inputs, outputs, parameters, timestamps, QC results, content metadata, and release status.
-8. **Timestamp certificate**: generate a timestamp image containing the output title, folder, generation time, manifest hash, and operator/tool note.
-9. **Cost image**: use WPS/DOCX template export when available; otherwise generate a visually simple image from the same fields. Apply configured signature/seal assets only when the user provided them or they exist in the configured cache path.
-10. **Jianying storyboard mode 2**: for the selected sample episodes, generate Jianying 5.9 drafts, split each episode into random `2-8s` micro-storyboard segments with exact total duration, write a seven-track timeline, run Whisper `small`, import subtitles, open Jianying, seek to the sidecar timestamp, zoom the timeline twice, capture one engineering screenshot per draft, then close Jianying and delete the temporary drafts.
-11. **Delivery**: return the output folder, counts, QC summary, failed items, subtitles, covers, release metadata, release queue, evidence images, timestamp image, cost image, storyboard screenshots, and any publishing status.
+6. **Content enhancement pack**: create requested subtitles, ranked cover candidates, editable copy, approved-script narration assets, and scene/pacing recommendations. Keep generated creative assets at `needs_review` until the user approves them.
+7. **Release-readiness gate**: analyze loudness, black/frozen/silent sections, decode errors, subtitle timing, rights evidence, attribution, AI-content labeling, and creative approval. Write `reports/release_readiness.json`, `.csv`, and `.md` with `pass`, `warning`, or `blocked` status.
+8. **Process evidence**: after the batch, generate process images/contact sheets and a machine-readable manifest that records inputs, outputs, parameters, timestamps, QC results, content metadata, cache/encoder provenance, and release status.
+9. **Timestamp certificate**: generate a timestamp image containing the output title, folder, generation time, manifest hash, and operator/tool note.
+10. **Cost image**: use WPS/DOCX template export when available; otherwise generate a visually simple image from the same fields. Apply configured signature/seal assets only when the user provided them or they exist in the configured cache path.
+11. **Jianying storyboard mode 2**: for the selected sample episodes, generate Jianying 5.9 drafts, split each episode into random `2-8s` micro-storyboard segments with exact total duration, write a seven-track timeline, run Whisper `small`, import subtitles, open Jianying, seek to the sidecar timestamp, zoom the timeline twice, capture one engineering screenshot per draft, then close Jianying and delete the temporary drafts.
+12. **Delivery**: return the output folder, counts, QC summary, failed items, subtitles, covers, release metadata, release queue, evidence images, timestamp image, cost image, storyboard screenshots, and any publishing status.
 
 ## Tool Routing
 
 Prefer these routes when available:
 
-- **Video processing**: FFmpeg/ffprobe for concat, trim, scale/crop/pad, speed, audio filters, bitrate control, metadata rewrite, and final validation.
+- **Video processing**: FFmpeg/ffprobe for concat, trim, scale/crop/pad, speed, audio filters, bitrate control, metadata rewrite, final validation, black/freeze/silence detection, and loudness measurement.
 - **Durable interactive job**: `scripts/remaster_job.py` for one-question intake, target-duration planning, execution, checkpoints, status, and resume.
 - **Low-level release pack**: `scripts/build_release_pack.py` for legacy direct arguments or a planned `--job-file` supplied by the durable controller.
+- **Release readiness**: `scripts/release_pipeline.py`, `scripts/media_analysis.py`, `scripts/subtitle_quality.py`, and `scripts/evaluate_release_readiness.py` for stable evidence rules and JSON/CSV/Markdown reports.
+- **Batch acceleration**: `scripts/batch_executor.py` for bounded episode workers, `scripts/encoder_selection.py` for verified hardware selection and software fallback, and `scripts/stage_cache.py` for hash-valid reuse. Use `remaster_job.py cache-prune` to remove only unreferenced cache entries.
+- **Content enhancement**: `scripts/content_enhancements.py` and `scripts/enhance_release_assets.py` for optional subtitle, cover, copy, narration, and editorial-recommendation artifacts.
 - **Frame analysis or visual transforms**: OpenCV/Pillow when FFmpeg filters are insufficient.
 - **Speech recognition**: faster-whisper or Whisper `small`; reuse a loaded model inside a batch.
 - **Subtitle and text QA**: generate SRT/VTT/TXT from Whisper output, correct obvious recognition errors only when context supports the edit, and flag uncertain segments for review.
@@ -112,4 +116,6 @@ Use neutral wording such as "authorized derivative metadata rewrite" or "metadat
 - If text or subtitles contain uncertain names, homophones, profanity, medical/financial/legal claims, or platform-sensitive wording, flag them in the review report instead of silently rewriting meaning.
 - If platform validation fails, repair only delivery-format issues automatically; require user review for creative copy, cover choice, and publication.
 - Do not publish failed-QC videos.
+- Keep processing and release status separate: `complete` means all required media passed local QC; release `pass` means no local finding remains; `warning` requires human review; `blocked` prohibits publishing preparation.
+- Disable encode-cache reuse when approved narration is mixed, then re-run output QC and readiness checks on the mixed file.
 - If a requested operation would remove third-party attribution, hide source identity, defeat content matching, or bypass platform enforcement, stop that operation and offer the closest permitted workflow: owned-brand replacement, attribution-preserving repost package, rights manifest, platform-spec validation, or duplicate-asset inventory.

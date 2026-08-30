@@ -70,6 +70,16 @@ Check each output for:
 
 Write a validation report and fix only mechanical delivery issues automatically. Creative copy and publication remain user-approved.
 
+The enhanced pipeline writes three synchronized readiness reports under `reports/`:
+
+- `release_readiness.json` for agents and automation;
+- `release_readiness.csv` for batch filtering;
+- `release_readiness.md` for human review.
+
+Every finding has a stable rule ID, severity, evidence, and remediation. `blocked` prevents publishing preparation, `warning` requires review, and `pass` only describes locally verifiable readiness.
+
+For AI-generated or fictionalized content, record the applicable content-label decision and whether the label is planned or applied. Preserve source metadata and required attribution; do not strip AI provenance or third-party credit as a delivery optimization.
+
 ## Release Queue
 
 Create both:
@@ -87,6 +97,7 @@ Use statuses:
 
 - `draft`: generated but not reviewed;
 - `ready`: user-approved and QC-passed;
+- `review`: media passed but readiness warnings or generated creative assets still need approval;
 - `scheduled`: queued for a publishing tool;
 - `published`: uploader reported success;
 - `blocked`: missing rights, QC failure, platform blocker, or user decision.

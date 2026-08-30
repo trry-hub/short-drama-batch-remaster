@@ -96,6 +96,9 @@ For each output episode:
 4. Apply speed `1.050x`.
 5. Apply authorized audio adjustment. Keep speech intelligible; do not create distorted audio.
 6. Apply authorized visual styling. Keep faces, subtitles, and plot-critical details readable.
+7. Select a verified hardware encoder in `auto` mode or fall back to `libx264`; record the effective encoder.
+8. Run independent output episodes with bounded workers. Only the parent process writes checkpoints and manifests.
+9. Reuse cached outputs only when source/segment/profile/tool keys, output hashes, and prior validation all match.
 7. Write clean export metadata and record source provenance in the manifest.
 8. Encode H.264/AAC MP4 with a `6500k` target video bitrate.
 
@@ -144,6 +147,8 @@ Generate:
 - internal duplicate inventory for the output folder when more than one episode exists.
 
 Run `scripts/check_release_pack.py` against the output folder when possible and include the JSON or CSV report in the manifest.
+
+Then run the release-readiness pipeline. It must inspect media quality, subtitle timing, rights evidence, attribution, AI-content label status, creative reviews, and publication approval, and write JSON/CSV/Markdown reports. Keep media completion separate from release readiness.
 
 When using `scripts/build_release_pack.py`, the tool creates `release_queue.csv`, `release_queue.jsonl`, `manifests/manifest.json`, `logs/batch.log`, `reports/release_pack_validation.*`, cover candidates, and evidence artifacts automatically.
 

@@ -10,6 +10,13 @@ Use this reference when selecting or installing tools for the short-drama batch 
 - `opencv-python`, `numpy`, and `Pillow`: useful for frame analysis, process images, and fallback image generation.
 - `faster-whisper` or `openai-whisper`: subtitle recognition; prefer faster-whisper when GPU/CPU compatibility is good.
 - `scripts/check_release_pack.py`: deterministic output-folder validation for MP4 duration, resolution, bitrate, file size, stream presence, and release-readiness reporting.
+- `scripts/media_analysis.py`: FFmpeg black/freeze/silence, loudness, stream, geometry, codec, and decode analysis.
+- `scripts/release_pipeline.py`: combines media, subtitle, rights, attribution, AI disclosure, and review evidence.
+- `scripts/evaluate_release_readiness.py`: standalone JSON/CSV/Markdown readiness report CLI.
+- `scripts/content_enhancements.py`: optional subtitle, ranked cover, editable copy, approved narration, and editorial-recommendation artifacts.
+- `scripts/encoder_selection.py`: short synthetic hardware probe with `libx264` fallback in auto mode.
+- `scripts/stage_cache.py`: content-addressed cache with SHA-256 and validation checks.
+- `srt`: structured SRT parsing for timing and text QA; install through the `quality` feature.
 
 ## Jianying Tools
 

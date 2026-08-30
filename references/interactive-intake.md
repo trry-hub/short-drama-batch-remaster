@@ -65,8 +65,13 @@ The controller asks only applicable fields:
 9. Starting output episode and optional source limit.
 10. Default or custom delivery profile.
 11. Width, height, speed, and video/audio bitrates for a custom profile.
-12. Cover, subtitle, release metadata, and evidence options.
-13. Platform, account label, and publishing preparation.
+12. Delivery-readiness profile.
+13. Cover, subtitle, release metadata, evidence, editable copy, narration, and scene/pacing recommendation options.
+14. Approved narration script, approval confirmation, and mix decision when narration is enabled.
+15. Video workers, enhancement workers, encoder mode, and validated cache choice.
+16. Platform, account label, and publishing preparation.
+
+Before planning mode, also collect an optional rights-evidence reference, whether attribution is required, required attribution text, whether the material contains AI-generated content, and whether its label is planned or already applied. Persist every answer immediately; do not silently infer the AI-content decision for a new job.
 
 The default profile is `1080x1920`, `1.050x`, H.264/AAC, `6500k` video, and `192k` audio.
 
@@ -91,9 +96,9 @@ Automatic random plot reordering is not part of this workflow. Use a mapping CSV
 | `running` | Builder is active | Continue reporting progress |
 | `needs_input` | A path, dependency, permission, account, or key is missing | Ask only for the recorded requirement |
 | `failed` | Processing ended with unresolved failures | Inspect logs, repair the cause, then resume |
-| `complete` | Every planned output exists and passed QC | Return the release pack |
+| `complete` | Every planned output exists and passed media QC | Return the release pack plus separate release-readiness status |
 
-An episode checkpoint is reusable only when its output exists, its SHA-256 still matches, and QC status is `pass`.
+An episode checkpoint is reusable only when its output exists, its SHA-256 still matches, and QC status is `pass`. A stage-cache hit additionally requires a matching content key, artifact hash, cache schema, and prior validation status. Use `cache-prune --job <path>` to remove unreferenced entries without deleting final videos.
 
 ## Host Installation
 
@@ -118,4 +123,4 @@ Use `--target` when a WorkBuddy version is configured with a different skills di
 
 The controller may install missing tools when a supported package manager can do so non-interactively. Administrator approval, credentials, logins, API keys, and platform accounts move the job to `needs_input`.
 
-Completion means all planned files passed local QC and release-pack validation. It does not guarantee Video Channels approval, copyright clearance, external fingerprint differences, or publication success.
+Completion means all planned files passed local media QC. Release readiness is separate: `pass` has no unresolved local finding, `warning` needs human review, and `blocked` must not be published. None of these statuses guarantees Video Channels approval, copyright clearance, external fingerprint differences, or publication success.
