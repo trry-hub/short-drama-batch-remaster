@@ -1,6 +1,6 @@
 ---
 name: short-drama-batch-remaster
-description: Batch remaster authorized short-drama episodes into vertical release packs with FFmpeg/OpenCV/Whisper, QC logs, subtitles, covers, release metadata, process evidence images, timestamp/cost images, publishing queues, and Jianying 5.9 storyboard draft screenshots. Use for short-drama batch optimization, remastering, release-package preparation, or Video Channels-ready deliverables; do not use for unauthorized reposting, watermark removal, or evading platform/copyright detection.
+description: Use when authorized short-drama videos need batch remastering, duration-based episode regrouping, vertical release packaging, QC, subtitles, covers, metadata, or Video Channels delivery preparation; excludes unauthorized reposting, watermark removal, and platform-check evasion.
 ---
 
 # Short Drama Batch Remaster
@@ -11,7 +11,22 @@ Use this skill to reproduce the local short-drama batch workflow represented by 
 
 The skill is a workflow orchestrator. Use the best available local tools and installed open-source projects rather than forcing one implementation. Install missing first-use dependencies automatically when that can be done without credentials, paid accounts, or unsafe privilege escalation.
 
-For a deterministic local run that mirrors the sample log's release-pack shape, prefer `scripts/build_release_pack.py`. It creates remastered outputs, QC reports, cover candidates, release queues, process/timestamp/cost artifacts, and a local difference report for authorized material. Treat its difference report as internal QC only; it is not a platform review guarantee.
+For a new execution request, prefer the durable controller in `scripts/remaster_job.py`. It collects and validates inputs, plans episodes, invokes `scripts/build_release_pack.py`, persists per-episode QC checkpoints, and resumes interrupted jobs. Treat local difference reports as internal QC only; they are not a platform review guarantee.
+
+## Interactive Intake and Execution
+
+This contract is host-neutral and applies in Codex, OpenCode, and Tencent WorkBuddy. Read [references/interactive-intake.md](references/interactive-intake.md) before starting an interactive or resumable job.
+
+For an execution request:
+
+1. If the user has not supplied an output root, ask for it first. Create the job with `python3 scripts/remaster_job.py init --output-root <path>`.
+2. Read the job with `status --json`. Ask only its `next_question`, and ask one question at a time.
+3. Persist each accepted answer immediately with `remaster_job.py set`. Reject an invalid value and repeat only that question.
+4. When `next_question` is null, run `plan`. Show the episode count, source ranges, estimated durations, warnings, and saved plan path.
+5. Obtain one explicit execution confirmation, then run `run --confirm`. Do not ask the intake questions again.
+6. Stay with the process until the job is `complete`, `failed`, or `needs_input`. If interrupted, use `resume --confirm` with the same job file.
+
+When chat-based local execution is unavailable, run `python3 scripts/remaster_job.py wizard` in a terminal. Do not replace the durable state machine with host-specific memory or a platform-specific question API.
 
 ## Boundaries
 
@@ -26,13 +41,13 @@ For a deterministic local run that mirrors the sample log's release-pack shape, 
 Before starting a real batch, read [references/workflow.md](references/workflow.md). Then run:
 
 ```bash
-python3 scripts/ensure_tools.py --install --features core,whisper,jianying,docs,ui
+python3 scripts/ensure_tools.py --install --features core,vision,whisper,jianying,docs,ui
 ```
 
 If publishing is requested, include the publish feature:
 
 ```bash
-python3 scripts/ensure_tools.py --install --features core,whisper,jianying,docs,ui,publish
+python3 scripts/ensure_tools.py --install --features core,vision,whisper,jianying,docs,ui,publish
 ```
 
 Use the script's report to decide the tool route. If a dependency needs administrator approval, login credentials, an API key, or a platform account, stop at that step and ask for the specific missing input.
@@ -45,7 +60,7 @@ For requests that need subtitle QA, sensitive-word review, title/description/has
 
 Follow the log-shaped workflow unless the user explicitly changes settings:
 
-1. **Intake and manifest**: identify source folder, source series name, output series name, episode range, source-to-output episode mapping, rights status, output root, and whether publishing is included.
+1. **Intake and manifest**: use `scripts/remaster_job.py` to collect source folder, source/output series names, episode planning mode, duration band or mapping, rights status, output root, delivery profile, enhancements, and publishing preparation.
 2. **Rights-safe transformation gate**: record whether the request involves watermark handling, attribution, reposting, or duplicate-asset management. Route only to the permitted alternatives in `references/rights-safe-transformations.md`.
 3. **Batch remaster**: for each output episode, assemble the mapped source episode(s), normalize to `1080x1920`, apply the configured `1.050x` speed change, audio adjustment, visual styling, and clean export metadata for authorized derivatives.
 4. **Encoding target**: encode toward `6500k` video bitrate, H.264/AAC MP4 unless the user requires another delivery profile.
@@ -62,7 +77,8 @@ Follow the log-shaped workflow unless the user explicitly changes settings:
 Prefer these routes when available:
 
 - **Video processing**: FFmpeg/ffprobe for concat, trim, scale/crop/pad, speed, audio filters, bitrate control, metadata rewrite, and final validation.
-- **One-command release pack**: `scripts/build_release_pack.py` for authorized batch remastering, local non-identity checks, QC, cover candidates, release queues, manifest, logs, timestamp image, and cost image.
+- **Durable interactive job**: `scripts/remaster_job.py` for one-question intake, target-duration planning, execution, checkpoints, status, and resume.
+- **Low-level release pack**: `scripts/build_release_pack.py` for legacy direct arguments or a planned `--job-file` supplied by the durable controller.
 - **Frame analysis or visual transforms**: OpenCV/Pillow when FFmpeg filters are insufficient.
 - **Speech recognition**: faster-whisper or Whisper `small`; reuse a loaded model inside a batch.
 - **Subtitle and text QA**: generate SRT/VTT/TXT from Whisper output, correct obvious recognition errors only when context supports the edit, and flag uncertain segments for review.

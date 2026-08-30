@@ -23,7 +23,21 @@ Use these defaults because they are explicit in the sample log:
 
 ## One-Command Local Tool
 
-Use `scripts/build_release_pack.py` when the user wants a concrete tool that follows the log-shaped batch route for authorized material. The tool performs FFmpeg remastering, writes a release folder, and generates local QC artifacts:
+Use the durable interactive controller for new jobs. It collects missing values, plans target-duration episodes, persists checkpoints, and invokes the release-pack builder:
+
+```bash
+python3 scripts/remaster_job.py wizard
+```
+
+Agent hosts use the non-interactive commands so each answer is saved immediately:
+
+```bash
+python3 scripts/remaster_job.py status --job /path/to/release/.job/job.json --json
+python3 scripts/remaster_job.py plan --job /path/to/release/.job/job.json
+python3 scripts/remaster_job.py resume --job /path/to/release/.job/job.json --confirm
+```
+
+Use `scripts/build_release_pack.py` directly only for legacy argument-driven runs or low-level debugging. It performs FFmpeg remastering, writes a release folder, and generates local QC artifacts:
 
 ```bash
 python3 scripts/build_release_pack.py /path/to/source \
@@ -35,6 +49,8 @@ python3 scripts/build_release_pack.py /path/to/source \
 ```
 
 For mapped episode combinations, provide a CSV with `output_episode` and `sources` columns. The `sources` value may use `+`, `;`, or `|` separators and may contain relative paths or episode numbers inferred from filenames.
+
+For automatic chronological regrouping, select `target-duration` during intake. Defaults are target `60s`, minimum `45s`, and maximum `75s`; the planner prefers file or scene boundaries and saves the exact source ranges before encoding.
 
 The tool's local difference report proves only that generated files are not byte-identical to their source inputs and records media-property changes for internal duplicate management. Do not describe this as platform fingerprint evasion or a Video Channels approval guarantee.
 
@@ -50,6 +66,8 @@ Collect or infer these before processing:
 - source-to-output mapping rules, for example `67+68 -> 84`;
 - rights status: owned, licensed, client-provided, or otherwise authorized;
 - whether to create subtitles, cover candidates, release metadata, process images, timestamp image, cost image, Jianying screenshots, and publishing tasks.
+
+For an execution request, collect these through `scripts/remaster_job.py`; ask one question at a time and use the controller's `next_question` rather than presenting the entire list at once.
 
 If filenames contain episode numbers, infer the mapping and show a short preview before encoding. If mapping cannot be inferred safely, ask for a CSV or plain-text mapping.
 
