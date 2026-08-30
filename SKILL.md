@@ -11,6 +11,8 @@ Use this skill to reproduce the local short-drama batch workflow represented by 
 
 The skill is a workflow orchestrator. Use the best available local tools and installed open-source projects rather than forcing one implementation. Install missing first-use dependencies automatically when that can be done without credentials, paid accounts, or unsafe privilege escalation.
 
+For a deterministic local run that mirrors the sample log's release-pack shape, prefer `scripts/build_release_pack.py`. It creates remastered outputs, QC reports, cover candidates, release queues, process/timestamp/cost artifacts, and a local difference report for authorized material. Treat its difference report as internal QC only; it is not a platform review guarantee.
+
 ## Boundaries
 
 - Work only on material the user owns or has permission to process and publish.
@@ -60,6 +62,7 @@ Follow the log-shaped workflow unless the user explicitly changes settings:
 Prefer these routes when available:
 
 - **Video processing**: FFmpeg/ffprobe for concat, trim, scale/crop/pad, speed, audio filters, bitrate control, metadata rewrite, and final validation.
+- **One-command release pack**: `scripts/build_release_pack.py` for authorized batch remastering, local non-identity checks, QC, cover candidates, release queues, manifest, logs, timestamp image, and cost image.
 - **Frame analysis or visual transforms**: OpenCV/Pillow when FFmpeg filters are insufficient.
 - **Speech recognition**: faster-whisper or Whisper `small`; reuse a loaded model inside a batch.
 - **Subtitle and text QA**: generate SRT/VTT/TXT from Whisper output, correct obvious recognition errors only when context supports the edit, and flag uncertain segments for review.

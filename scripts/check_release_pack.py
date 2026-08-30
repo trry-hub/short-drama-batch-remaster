@@ -51,6 +51,17 @@ def to_float(value: Any) -> float | None:
         return None
 
 
+def effective_bitrate_tolerance(duration_s: float | None, tolerance_mbps: float) -> float:
+    """Short clips have container/encoder overhead that makes average bitrate noisy."""
+    if duration_s is None:
+        return tolerance_mbps
+    if duration_s < 10:
+        return max(tolerance_mbps, 2.0)
+    if duration_s < 30:
+        return max(tolerance_mbps, 1.5)
+    return tolerance_mbps
+
+
 def validate_video(path: Path, width: int, height: int, target_mbps: float, tolerance_mbps: float) -> VideoReport:
     problems: list[str] = []
     duration_s: float | None = None
@@ -88,10 +99,11 @@ def validate_video(path: Path, width: int, height: int, target_mbps: float, tole
         problems.append(f"resolution {actual_width}x{actual_height}, expected {width}x{height}")
     if duration_s is None or duration_s <= 0:
         problems.append("invalid duration")
+    tolerance = effective_bitrate_tolerance(duration_s, tolerance_mbps)
     if bitrate_mbps is None:
         problems.append("missing bitrate")
-    elif abs(bitrate_mbps - target_mbps) > tolerance_mbps:
-        problems.append(f"bitrate {bitrate_mbps:.2f}Mbps outside target {target_mbps:.2f}+/-{tolerance_mbps:.2f}")
+    elif abs(bitrate_mbps - target_mbps) > tolerance:
+        problems.append(f"bitrate {bitrate_mbps:.2f}Mbps outside target {target_mbps:.2f}+/-{tolerance:.2f}")
     if size_mb <= 0:
         problems.append("empty file")
 

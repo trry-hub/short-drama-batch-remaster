@@ -21,6 +21,23 @@ Use these defaults because they are explicit in the sample log:
 | Jianying route | Jianying Professional `5.9` when available |
 | Storyboard evidence count | default `4` sample episodes unless user requests all |
 
+## One-Command Local Tool
+
+Use `scripts/build_release_pack.py` when the user wants a concrete tool that follows the log-shaped batch route for authorized material. The tool performs FFmpeg remastering, writes a release folder, and generates local QC artifacts:
+
+```bash
+python3 scripts/build_release_pack.py /path/to/source \
+  --output-root /path/to/release-pack \
+  --source-series "Source Series" \
+  --output-series "Output Series" \
+  --rights-status owned \
+  --install-missing
+```
+
+For mapped episode combinations, provide a CSV with `output_episode` and `sources` columns. The `sources` value may use `+`, `;`, or `|` separators and may contain relative paths or episode numbers inferred from filenames.
+
+The tool's local difference report proves only that generated files are not byte-identical to their source inputs and records media-property changes for internal duplicate management. Do not describe this as platform fingerprint evasion or a Video Channels approval guarantee.
+
 ## Required Inputs
 
 Collect or infer these before processing:
@@ -109,6 +126,8 @@ Generate:
 - internal duplicate inventory for the output folder when more than one episode exists.
 
 Run `scripts/check_release_pack.py` against the output folder when possible and include the JSON or CSV report in the manifest.
+
+When using `scripts/build_release_pack.py`, the tool creates `release_queue.csv`, `release_queue.jsonl`, `manifests/manifest.json`, `logs/batch.log`, `reports/release_pack_validation.*`, cover candidates, and evidence artifacts automatically.
 
 ## Stage 4: Process Evidence
 

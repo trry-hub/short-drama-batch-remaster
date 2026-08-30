@@ -6,6 +6,7 @@ Use this reference when selecting or installing tools for the short-drama batch 
 
 - `ffmpeg` and `ffprobe`: required for encoding, concatenation, speed changes, audio filters, metadata rewrite, and QC.
 - Python 3.9 or newer: required for orchestration scripts.
+- `scripts/build_release_pack.py`: one-command authorized release-pack builder that remasters videos, generates cover candidates, release queues, manifests, logs, timestamp/cost artifacts, and local non-identity reports.
 - `opencv-python`, `numpy`, and `Pillow`: useful for frame analysis, process images, and fallback image generation.
 - `faster-whisper` or `openai-whisper`: subtitle recognition; prefer faster-whisper when GPU/CPU compatibility is good.
 - `scripts/check_release_pack.py`: deterministic output-folder validation for MP4 duration, resolution, bitrate, file size, stream presence, and release-readiness reporting.
