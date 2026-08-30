@@ -116,6 +116,14 @@ class RemasterJobCoreTests(unittest.TestCase):
                 job = set_job_field(job, field, value)
             self.assertEqual(next_question(job).field, "planning.mapping_csv")
 
+    def test_narration_questions_require_script_and_approval(self) -> None:
+        job = new_job(ROOT / "work" / "release")
+        job = set_job_field(job, "enhancements.narration", "yes")
+        questions = [question.field for question in __import__("remaster_job_core")._question_table(job)]
+        self.assertIn("enhancements.narration_script", questions)
+        self.assertIn("enhancements.narration_script_approved", questions)
+        self.assertIn("enhancements.mix_narration", questions)
+
     def test_validation_rejects_invalid_duration_band(self) -> None:
         from tempfile import TemporaryDirectory
 

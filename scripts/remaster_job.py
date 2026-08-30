@@ -37,6 +37,7 @@ from remaster_job_core import (
     set_job_field,
     validate_job,
 )
+from stage_cache import StageCache
 
 
 SCRIPTS = Path(__file__).resolve().parent
@@ -329,7 +330,9 @@ def execute_job(job_path: Path, *, resume: bool, confirmed: bool) -> int:
     updated = load_job(job_path)
     planned_numbers = [str(item["output_episode"]) for item in updated.get("episode_plan", [])]
     complete = all(should_skip_episode(updated.get("episodes", {}).get(number)) for number in planned_numbers)
-    if proc.returncode == 0 and planned_numbers and complete:
+    if updated.get("status") == "needs_input":
+        exit_code = EXIT_NEEDS_INPUT
+    elif proc.returncode == 0 and planned_numbers and complete:
         updated["status"] = "complete"
         updated["last_error"] = None
         updated["needs_input"] = None
@@ -346,6 +349,7 @@ def execute_job(job_path: Path, *, resume: bool, confirmed: bool) -> int:
             "job_path": str(job_path),
             "output_root": updated["output_root"],
             "invalidated_episodes": invalidated,
+            "release_readiness": updated.get("release_readiness"),
         }
     )
     return exit_code
@@ -353,6 +357,26 @@ def execute_job(job_path: Path, *, resume: bool, confirmed: bool) -> int:
 
 def cmd_execute(args: argparse.Namespace) -> int:
     return execute_job(args.job, resume=args.command == "resume", confirmed=args.confirm)
+
+
+def cmd_cache_prune(args: argparse.Namespace) -> int:
+    job = load_job(args.job)
+    referenced = {
+        str(state.get("cache_key"))
+        for state in job.get("episodes", {}).values()
+        if state.get("cache_key")
+    }
+    cache = StageCache(Path(job["output_root"]) / ".job" / "cache")
+    result = cache.prune(referenced)
+    print_json(
+        {
+            "ok": True,
+            "entries_removed": result.entries_removed,
+            "bytes_removed": result.bytes_removed,
+            "referenced_entries": len(referenced),
+        }
+    )
+    return EXIT_OK
 
 
 def wizard(output_root: Path | None) -> int:
@@ -428,6 +452,10 @@ def build_parser() -> argparse.ArgumentParser:
         execute_parser.add_argument("--job", type=Path, required=True)
         execute_parser.add_argument("--confirm", action="store_true")
         execute_parser.set_defaults(handler=cmd_execute)
+
+    cache_parser = subparsers.add_parser("cache-prune")
+    cache_parser.add_argument("--job", type=Path, required=True)
+    cache_parser.set_defaults(handler=cmd_cache_prune)
 
     wizard_parser = subparsers.add_parser("wizard")
     wizard_parser.add_argument("--output-root", type=Path)

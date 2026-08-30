@@ -15,6 +15,7 @@ sys.path.insert(0, str(SCRIPTS))
 
 from remaster_job_core import job_path_for_output, new_job, save_job  # noqa: E402
 from remaster_job import invalidate_changed_source_checkpoints  # noqa: E402
+from stage_cache import StageCache  # noqa: E402
 
 
 def run_cli(*args: str, input_text: str = "", env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
@@ -100,6 +101,25 @@ class RemasterJobCliTests(unittest.TestCase):
         self.assertEqual(affected, [1])
         self.assertNotIn("1", updated["episodes"])
         self.assertIn("2", updated["episodes"])
+
+    def test_cache_prune_preserves_checkpoint_references(self) -> None:
+        with TemporaryDirectory() as raw:
+            output = Path(raw) / "release"
+            job_path = job_path_for_output(output)
+            job = new_job(output)
+            job["episodes"] = {"1": {"cache_key": "keep"}}
+            save_job(job_path, job)
+            artifact = Path(raw) / "artifact.mp4"
+            artifact.write_bytes(b"video")
+            cache = StageCache(output / ".job" / "cache")
+            cache.store("keep", artifact, validation_status="pass")
+            cache.store("remove", artifact, validation_status="pass")
+            result = run_cli("cache-prune", "--job", str(job_path))
+            self.assertEqual(result.returncode, 0, result.stdout)
+            payload = json.loads(result.stdout)
+            self.assertEqual(payload["entries_removed"], 1)
+            self.assertIsNotNone(cache.lookup("keep"))
+            self.assertIsNone(cache.lookup("remove"))
 
 
 if __name__ == "__main__":

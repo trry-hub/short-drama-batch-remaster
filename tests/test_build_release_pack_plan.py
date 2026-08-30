@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import sys
+import shutil
+import subprocess
 import unittest
 from argparse import Namespace
 from pathlib import Path
@@ -18,11 +20,14 @@ from build_release_pack import (  # noqa: E402
     is_full_source_segment,
     parse_args,
     parse_episode_plan,
+    mix_narration_into_video,
+    probe_video,
     should_skip_episode,
     update_episode_checkpoint,
 )
 from episode_planner import SourceSegment  # noqa: E402
 from encoder_selection import EncoderChoice  # noqa: E402
+from content_enhancements import EnhancementArtifact  # noqa: E402
 from remaster_job_core import load_job, new_job, save_job  # noqa: E402
 
 
@@ -120,6 +125,53 @@ class BuildReleasePackPlanTests(unittest.TestCase):
         )
         self.assertEqual(encoder_output_args(software), ["-c:v", "libx264", "-preset", "medium"])
         self.assertEqual(encoder_output_args(hardware), ["-c:v", "h264_videotoolbox", "-allow_sw", "0"])
+
+    @unittest.skipUnless(shutil.which("ffmpeg") and shutil.which("ffprobe"), "FFmpeg required")
+    def test_narration_mix_preserves_valid_video_and_audio(self) -> None:
+        with TemporaryDirectory() as raw:
+            root = Path(raw)
+            video = root / "episode.mp4"
+            narration = root / "narration.m4a"
+            subprocess.run(
+                [
+                    "ffmpeg", "-y", "-v", "error",
+                    "-f", "lavfi", "-i", "color=c=blue:s=160x284:r=30:d=2",
+                    "-f", "lavfi", "-i", "sine=frequency=440:duration=2",
+                    "-shortest", "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac", str(video),
+                ],
+                check=True,
+            )
+            subprocess.run(
+                ["ffmpeg", "-y", "-v", "error", "-f", "lavfi", "-i", "sine=frequency=880:duration=1", "-c:a", "aac", str(narration)],
+                check=True,
+            )
+            original_hashes = hash_file(video)
+            original_probe = probe_video(video)
+            result = EpisodeResult(
+                episode_number=1,
+                sources=[str(video)],
+                output_path=str(video),
+                status="complete",
+                qc_status="pass",
+                source_hashes=[original_hashes],
+                source_probe=[original_probe],
+                output_hashes=original_hashes,
+                output_probe=original_probe,
+            )
+            artifact = EnhancementArtifact("narration", str(narration), 1, "test", {}, "now")
+            args = Namespace(
+                audio_bitrate="96k",
+                width=160,
+                height=284,
+                video_bitrate="600k",
+                bitrate_tolerance_mbps=2.0,
+            )
+            mix_narration_into_video(result, artifact, args)
+            self.assertNotEqual(result.output_hashes["sha256"], original_hashes["sha256"])
+            self.assertTrue(result.output_probe.has_video)
+            self.assertTrue(result.output_probe.has_audio)
+            self.assertEqual(result.qc_status, "pass")
+            self.assertEqual(result.cache_status, "disabled-mixed")
 
 
 if __name__ == "__main__":

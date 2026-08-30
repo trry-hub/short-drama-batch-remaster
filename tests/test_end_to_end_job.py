@@ -82,7 +82,7 @@ def make_ready_intake(output_root: Path, source_root: Path) -> Path:
         ("enhancements.copy", "no"),
         ("enhancements.narration", "no"),
         ("enhancements.editorial_recommendations", "yes"),
-        ("execution.workers", "1"),
+        ("execution.workers", "2"),
         ("execution.enhancement_workers", "1"),
         ("execution.encoder", "software"),
         ("execution.cache", "yes"),
@@ -129,6 +129,9 @@ class EndToEndJobTests(unittest.TestCase):
             )
             self.assertEqual(first_run.returncode, 0, first_run.stdout)
             complete = load_job(job_path)
+            self.assertEqual(complete["status"], "complete")
+            self.assertEqual(complete["release_readiness"]["status"], "blocked")
+            self.assertTrue(Path(complete["release_readiness"]["report"]).is_file())
             first_path = Path(complete["episodes"]["1"]["output_path"])
             second_path = Path(complete["episodes"]["2"]["output_path"])
             first_mtime = first_path.stat().st_mtime_ns
@@ -145,10 +148,15 @@ class EndToEndJobTests(unittest.TestCase):
             self.assertEqual(resumed.returncode, 0, resumed.stdout)
             self.assertEqual(first_path.stat().st_mtime_ns, first_mtime)
             self.assertTrue(second_path.is_file())
-            self.assertEqual(load_job(job_path)["status"], "complete")
+            resumed_job = load_job(job_path)
+            self.assertEqual(resumed_job["status"], "complete")
+            self.assertEqual(resumed_job["episodes"]["2"]["cache_status"], "hit")
 
             manifest = json.loads((output_root / "manifests" / "manifest.json").read_text(encoding="utf-8"))
             self.assertEqual(len(manifest["episodes"]), 2)
+            self.assertEqual(len(manifest["release_readiness"]["reports"]), 3)
+            for suffix in ("json", "csv", "md"):
+                self.assertTrue((output_root / "reports" / f"release_readiness.{suffix}").is_file())
 
 
 if __name__ == "__main__":

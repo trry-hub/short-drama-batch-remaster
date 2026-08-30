@@ -100,6 +100,8 @@ def new_job(output_root: Path) -> dict[str, Any]:
             "evidence": True,
             "copy": False,
             "narration": False,
+            "narration_script": None,
+            "narration_script_approved": False,
             "mix_narration": False,
             "editorial_recommendations": True,
         },
@@ -149,6 +151,8 @@ def normalize_job(job: dict[str, Any]) -> dict[str, Any]:
         "evidence": True,
         "copy": False,
         "narration": False,
+        "narration_script": None,
+        "narration_script_approved": False,
         "mix_narration": False,
         "editorial_recommendations": True,
     }
@@ -309,6 +313,8 @@ def _field_parser(field: str) -> Callable[[str], Any]:
         "enhancements.evidence": _boolean,
         "enhancements.copy": _boolean,
         "enhancements.narration": _boolean,
+        "enhancements.narration_script": _existing_file,
+        "enhancements.narration_script_approved": _boolean,
         "enhancements.mix_narration": _boolean,
         "enhancements.editorial_recommendations": _boolean,
         "platform": lambda value: _require_text(value, "platform"),
@@ -420,7 +426,13 @@ def _question_table(job: dict[str, Any]) -> list[Question]:
         ]
     )
     if job.get("enhancements", {}).get("narration"):
-        questions.append(Question("enhancements.mix_narration", "Mix approved narration into the video", "no"))
+        questions.extend(
+            [
+                Question("enhancements.narration_script", "Approved narration script path"),
+                Question("enhancements.narration_script_approved", "Confirm narration script approval", "no"),
+                Question("enhancements.mix_narration", "Mix approved narration into the video", "no"),
+            ]
+        )
     questions.extend(
         [
             Question("enhancements.editorial_recommendations", "Generate scene and pacing recommendations", "yes"),
@@ -485,6 +497,13 @@ def validate_job(job: dict[str, Any], require_ready: bool = False) -> list[str]:
     attribution = job.get("attribution", {})
     if attribution.get("required") and not str(attribution.get("text", "")).strip():
         problems.append("required attribution text is missing")
+    enhancements = job.get("enhancements", {})
+    if enhancements.get("narration"):
+        narration_script = enhancements.get("narration_script")
+        if not narration_script or not Path(narration_script).is_file():
+            problems.append("approved narration script does not exist")
+        if not enhancements.get("narration_script_approved"):
+            problems.append("narration script approval is required")
     if require_ready:
         question = next_question(job)
         if question is not None:

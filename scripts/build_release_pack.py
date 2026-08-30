@@ -14,6 +14,7 @@ import csv
 import hashlib
 import json
 import math
+import os
 import re
 import shutil
 import subprocess
@@ -25,8 +26,16 @@ from pathlib import Path
 from typing import Any, Iterable
 
 from batch_executor import execute_episodes, resolve_worker_count
+from content_enhancements import (
+    EnhancementArtifact,
+    EnhancementRequest,
+    NeedsInput,
+    artifacts_to_dict,
+    enhance_episode,
+)
 from encoder_selection import EncoderChoice, select_encoder
 from episode_planner import SourceSegment
+from release_pipeline import run_readiness_pipeline
 from remaster_job_core import load_job, save_job
 from stage_cache import StageCache, build_cache_key
 
@@ -106,6 +115,19 @@ class EpisodeContext:
     checkpoints: dict[int, dict[str, Any]]
     cache: StageCache | None
     encoder_choice: EncoderChoice
+
+
+@dataclass(frozen=True)
+class EnhancementWorkItem:
+    output_episode: int
+    result: EpisodeResult
+
+
+@dataclass(frozen=True)
+class EnhancementWorkResult:
+    episode_number: int
+    artifacts: tuple[EnhancementArtifact, ...]
+    error: str | None = None
 
 
 class EpisodeLogger:
@@ -821,20 +843,101 @@ def process_episode(job: EpisodeJob, context: EpisodeContext) -> EpisodeResult:
                         logger.line(f"Episode {job.output_episode:03d}: attempt {attempt} failed; retrying: {exc}")
                     else:
                         logger.line(f"Episode {job.output_episode:03d}: failed after {attempt} attempts: {exc}")
-        if result.status == "complete" and not args.skip_covers and result.output_probe:
-            covers = extract_cover_candidates(
-                output_path,
-                context.covers_dir,
-                job.output_episode,
-                result.output_probe.duration_s,
-                logger,
-            )
-            result.cover_candidates = [str(path) for path in covers]
     finally:
         if not args.keep_temp:
             shutil.rmtree(worker_temp, ignore_errors=True)
     result.log_lines = logger.lines
     return result
+
+
+def run_enhancement_stage(
+    results: list[EpisodeResult],
+    args: argparse.Namespace,
+) -> tuple[dict[int, list[EnhancementArtifact]], list[str]]:
+    selected = [result for result in results if result.status == "complete" and result.output_path]
+    jobs = [EnhancementWorkItem(result.episode_number, result) for result in selected]
+
+    def worker(item: EnhancementWorkItem) -> EnhancementWorkResult:
+        request = EnhancementRequest(
+            episode=item.output_episode,
+            video_path=Path(item.result.output_path or ""),
+            output_root=args.output_root,
+            subtitles=bool(args.subtitles),
+            covers=bool(args.covers),
+            copy=bool(args.copy),
+            narration=bool(args.narration_script),
+            editorial_recommendations=bool(args.editorial_recommendations),
+            narration_script=args.narration_script,
+            narration_script_approved=bool(args.narration_script_approved),
+        )
+        try:
+            artifacts = enhance_episode(request)
+            return EnhancementWorkResult(item.output_episode, tuple(artifacts))
+        except NeedsInput as exc:
+            return EnhancementWorkResult(item.output_episode, (), str(exc))
+        except Exception as exc:
+            return EnhancementWorkResult(item.output_episode, (), f"content enhancement failed: {exc}")
+
+    if not jobs:
+        return {}, []
+    worker_count = min(resolve_worker_count(args.enhancement_workers), len(jobs))
+    enhancement_results = execute_episodes(jobs, worker, worker_count)
+    artifacts_by_episode = {item.episode_number: list(item.artifacts) for item in enhancement_results}
+    errors = [f"episode {item.episode_number:03d}: {item.error}" for item in enhancement_results if item.error]
+    return artifacts_by_episode, errors
+
+
+def mix_narration_into_video(
+    result: EpisodeResult,
+    narration: EnhancementArtifact,
+    args: argparse.Namespace,
+) -> None:
+    if not result.output_path:
+        raise RuntimeError("cannot mix narration without an output video")
+    video_path = Path(result.output_path)
+    narration_path = Path(narration.path)
+    mixed_path = video_path.with_suffix(".mixing.mp4")
+    command = [
+        "ffmpeg",
+        "-y",
+        "-v",
+        "error",
+        "-i",
+        str(video_path),
+        "-i",
+        str(narration_path),
+        "-filter_complex",
+        "[0:a]volume=0.45[base];[1:a]volume=1.0[voice];[base][voice]amix=inputs=2:duration=first:dropout_transition=2[a]",
+        "-map",
+        "0:v",
+        "-map",
+        "[a]",
+        "-c:v",
+        "copy",
+        "-c:a",
+        "aac",
+        "-b:a",
+        args.audio_bitrate,
+        "-movflags",
+        "+faststart",
+        str(mixed_path),
+    ]
+    try:
+        run(command, check=True)
+        mixed_probe = probe_video(mixed_path)
+        status, problems = qc_status(mixed_probe, args)
+        mixed_hashes = hash_file(mixed_path)
+        difference = local_difference_report(result.source_hashes, mixed_hashes, result.source_probe, mixed_probe)
+        if status != "pass" or difference.get("status") != "pass":
+            raise RuntimeError("mixed narration output failed QC: " + "; ".join(problems))
+        os.replace(mixed_path, video_path)
+        result.output_probe = mixed_probe
+        result.output_hashes = mixed_hashes
+        result.local_difference = difference
+        result.qc_status = "pass"
+        result.cache_status = "disabled-mixed"
+    finally:
+        mixed_path.unlink(missing_ok=True)
 
 
 def make_text_image(path: Path, title: str, lines: list[str]) -> Path:
@@ -1025,6 +1128,19 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     cache_group.add_argument("--no-cache", dest="cache", action="store_false")
     parser.add_argument("--platform", default="WeChat Channels")
     parser.add_argument("--account", default="")
+    parser.add_argument("--delivery-profile", default="video-channels")
+    parser.add_argument("--delivery-profile-version", type=int, default=1)
+    parser.add_argument("--rights-evidence", default="")
+    parser.add_argument("--attribution-text", default="")
+    parser.add_argument("--ai-content", choices=["yes", "no"], default="no")
+    parser.add_argument("--ai-label", choices=["not-applicable", "planned", "applied"], default="not-applicable")
+    parser.add_argument("--subtitles", action="store_true")
+    parser.add_argument("--copy", action="store_true")
+    parser.add_argument("--narration-script", type=Path)
+    parser.add_argument("--approve-narration-script", action="store_true")
+    parser.add_argument("--mix-narration", action="store_true")
+    parser.add_argument("--editorial-recommendations", action="store_true")
+    parser.add_argument("--publishing-approved", action="store_true")
     parser.add_argument("--install-missing", action="store_true")
     parser.add_argument("--skip-covers", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
@@ -1044,6 +1160,15 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         ]
         if missing:
             parser.error(f"legacy mode requires: {', '.join(missing)}")
+        args.covers = not args.skip_covers
+        args.narration_script_approved = args.approve_narration_script
+        args.attribution = {
+            "required": bool(args.attribution_text),
+            "text": args.attribution_text,
+            "approved": bool(args.attribution_text),
+        }
+        args.disclosure = {"ai_content": args.ai_content == "yes", "ai_label": args.ai_label}
+        args.publishing = {"prepare": False, "approved": args.publishing_approved}
     return args
 
 
@@ -1072,8 +1197,43 @@ def apply_job_document(args: argparse.Namespace, document: dict[str, Any]) -> ar
     args.enhancement_workers = int(execution.get("enhancement_workers", args.enhancement_workers))
     args.encoder = execution.get("encoder", args.encoder)
     args.cache = bool(execution.get("cache", args.cache))
+    delivery = document.get("delivery_profile", {})
+    args.delivery_profile = delivery.get("name", args.delivery_profile)
+    args.delivery_profile_version = int(delivery.get("version", args.delivery_profile_version))
+    args.rights_evidence = document.get("rights_evidence", "")
+    args.attribution = document.get("attribution", {"required": False, "text": "", "approved": False})
+    args.disclosure = document.get("disclosure", {"ai_content": False, "ai_label": "not-applicable"})
+    args.publishing = document.get("publishing", {"prepare": False, "approved": False})
+    args.subtitles = bool(enhancements.get("subtitles"))
+    args.covers = bool(enhancements.get("covers"))
+    args.copy = bool(enhancements.get("copy"))
+    narration_script = enhancements.get("narration_script")
+    args.narration_script = Path(narration_script) if enhancements.get("narration") and narration_script else None
+    args.narration_script_approved = bool(enhancements.get("narration_script_approved"))
+    args.mix_narration = bool(enhancements.get("mix_narration"))
+    args.editorial_recommendations = bool(enhancements.get("editorial_recommendations"))
     args.job_document = document
     return args
+
+
+def release_context_from_args(args: argparse.Namespace) -> dict[str, Any]:
+    if args.job_document:
+        return copy.deepcopy(args.job_document)
+    return {
+        "rights_status": args.rights_status,
+        "rights_evidence": args.rights_evidence,
+        "attribution": args.attribution,
+        "disclosure": args.disclosure,
+        "delivery_profile": {"name": args.delivery_profile, "version": args.delivery_profile_version},
+        "enhancements": {
+            "covers": args.covers,
+            "subtitles": args.subtitles,
+            "metadata": True,
+            "copy": args.copy,
+            "narration": bool(args.narration_script),
+        },
+        "publishing": args.publishing,
+    }
 
 
 def main() -> int:
@@ -1151,7 +1311,8 @@ def main() -> int:
     if args.resume and args.job_file:
         checkpoint_document = load_job(args.job_file)
         checkpoints = {int(key): value for key, value in checkpoint_document.get("episodes", {}).items()}
-    cache = StageCache(args.output_root / ".job" / "cache") if args.cache and not args.dry_run else None
+    cache_allowed = args.cache and not args.dry_run and not args.mix_narration
+    cache = StageCache(args.output_root / ".job" / "cache") if cache_allowed else None
     context = EpisodeContext(
         args=args,
         videos_dir=videos_dir,
@@ -1202,6 +1363,122 @@ def main() -> int:
         else:
             temp_context.cleanup()
 
+    artifacts_by_episode: dict[int, list[EnhancementArtifact]] = {}
+    enhancement_errors: list[str] = []
+    release_result = None
+    if not args.dry_run:
+        artifacts_by_episode, enhancement_errors = run_enhancement_stage(results, args)
+        if args.mix_narration:
+            for result in results:
+                narration = next(
+                    (item for item in artifacts_by_episode.get(result.episode_number, []) if item.kind == "narration"),
+                    None,
+                )
+                if result.status != "complete":
+                    continue
+                if narration is None:
+                    enhancement_errors.append(f"episode {result.episode_number:03d}: narration mixing requested but no narration asset exists")
+                    continue
+                try:
+                    mix_narration_into_video(result, narration, args)
+                    if args.job_file:
+                        update_episode_checkpoint(args.job_file, result)
+                except Exception as exc:
+                    enhancement_errors.append(f"episode {result.episode_number:03d}: narration mixing failed: {exc}")
+
+        all_cover_paths = []
+        for result in results:
+            cover_paths = [
+                item.path for item in artifacts_by_episode.get(result.episode_number, []) if item.kind == "cover"
+            ]
+            result.cover_candidates = cover_paths
+            if cover_paths:
+                all_cover_paths.append(Path(cover_paths[0]))
+        manifest["episodes"] = [asdict(result) for result in results]
+        manifest["content_enhancements"] = {
+            "artifacts": {
+                str(episode): artifacts_to_dict(artifacts) for episode, artifacts in artifacts_by_episode.items()
+            },
+            "errors": enhancement_errors,
+        }
+        enhancement_report_path = reports_dir / "content_enhancements.json"
+        enhancement_report_path.write_text(
+            json.dumps(manifest["content_enhancements"], ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        logger.line(f"Content enhancement report complete; errors: {len(enhancement_errors)}")
+
+        release_context = release_context_from_args(args)
+        error_map: dict[int, str] = {}
+        for message in enhancement_errors:
+            match = re.match(r"episode (\d+):\s*(.*)", message)
+            if match:
+                error_map[int(match.group(1))] = match.group(2)
+        release_context["enhancement_errors"] = error_map
+        release_result = run_readiness_pipeline(
+            manifest,
+            release_context,
+            artifacts_by_episode,
+            reports_dir,
+        )
+        manifest["release_readiness"] = {
+            "status": release_result.status,
+            "json": str(release_result.paths.json),
+            "csv": str(release_result.paths.csv),
+            "markdown": str(release_result.paths.markdown),
+            "reports": [report.to_dict() for report in release_result.reports],
+        }
+        logger.line(f"Release readiness: {release_result.status}")
+
+        report_by_episode = {
+            int(report.subject.split("-")[-1]): report
+            for report in release_result.reports
+            if report.subject.startswith("episode-")
+        }
+        artifacts_lookup = artifacts_by_episode
+        for row in release_rows:
+            episode = int(row["episode_number"])
+            artifacts = artifacts_lookup.get(episode, [])
+            cover = next((item for item in artifacts if item.kind == "cover"), None)
+            copy_artifact = next((item for item in artifacts if item.kind == "copy"), None)
+            if cover:
+                row["cover_path"] = cover.path
+            if copy_artifact:
+                try:
+                    copy_payload = json.loads(Path(copy_artifact.path).read_text(encoding="utf-8"))
+                    titles = copy_payload.get("title_candidates", [])
+                    if titles:
+                        row["title"] = str(titles[0])
+                    row["description"] = str(copy_payload.get("description_draft", row["description"]))
+                    row["tags"] = ",".join(copy_payload.get("tags_draft", [])) or row["tags"]
+                except (OSError, json.JSONDecodeError):
+                    pass
+            report = report_by_episode.get(episode)
+            if report is None or report.status == "blocked":
+                row["status"] = "blocked"
+                row["review_status"] = "blocked"
+            elif report.status == "warning":
+                row["status"] = "review"
+                row["review_status"] = "needs_review"
+            elif args.publishing.get("approved"):
+                row["status"] = "ready"
+                row["review_status"] = "approved"
+            else:
+                row["status"] = "draft"
+                row["review_status"] = "needs_review"
+
+        if args.job_file:
+            job_document = load_job(args.job_file)
+            job_document["release_readiness"] = {
+                "status": release_result.status,
+                "report": str(release_result.paths.json),
+            }
+            if enhancement_errors:
+                job_document["status"] = "needs_input"
+                job_document["needs_input"] = "; ".join(enhancement_errors)
+                job_document["last_error"] = job_document["needs_input"]
+            save_job(args.job_file, job_document)
+
     write_release_queue(args.output_root / "release_queue.csv", args.output_root / "release_queue.jsonl", release_rows)
     logger.line("Release queue files complete")
 
@@ -1250,7 +1527,22 @@ def main() -> int:
     succeeded = sum(1 for item in manifest["episodes"] if item["status"] == "complete")
     failed = sum(1 for item in manifest["episodes"] if item["status"] == "failed")
     logger.line(f"Batch summary: {succeeded} complete, {failed} failed, {len(jobs)} total")
-    print(json.dumps({"output_root": str(args.output_root), "manifest": str(manifest_path), "complete": succeeded, "failed": failed}, ensure_ascii=False, indent=2))
+    print(
+        json.dumps(
+            {
+                "output_root": str(args.output_root),
+                "manifest": str(manifest_path),
+                "complete": succeeded,
+                "failed": failed,
+                "release_readiness": release_result.status if release_result else "not_run",
+                "enhancement_errors": enhancement_errors,
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+    )
+    if enhancement_errors:
+        return 3
     return 0 if failed == 0 else 1
 
 

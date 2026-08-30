@@ -325,7 +325,7 @@ def _default_scene_boundaries(path: Path) -> list[float]:
             "-i",
             str(path),
             "-filter:v",
-            "select='gt(scene,0.35)',showinfo",
+            "select=gt(scene\\,0.35),showinfo",
             "-f",
             "null",
             "-",
