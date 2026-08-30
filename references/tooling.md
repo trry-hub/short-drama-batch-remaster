@@ -8,6 +8,7 @@ Use this reference when selecting or installing tools for the short-drama batch 
 - Python 3.9 or newer: required for orchestration scripts.
 - `opencv-python`, `numpy`, and `Pillow`: useful for frame analysis, process images, and fallback image generation.
 - `faster-whisper` or `openai-whisper`: subtitle recognition; prefer faster-whisper when GPU/CPU compatibility is good.
+- `scripts/check_release_pack.py`: deterministic output-folder validation for MP4 duration, resolution, bitrate, file size, stream presence, and release-readiness reporting.
 
 ## Jianying Tools
 
@@ -25,6 +26,7 @@ Jianying Professional 5.9 on Windows is the most compatible route for automatic 
 - WPS Office is preferred for DOCX-template cost image export when installed.
 - Use `python-docx`, `reportlab`, `PyMuPDF`, and `Pillow` as a fallback for cost/timestamp images.
 - Only use signature and seal assets from paths the user provided or from an existing configured cache path.
+- Use FFmpeg frame extraction plus Pillow/OpenCV for cover candidates and process contact sheets.
 
 ## Publishing Tools
 

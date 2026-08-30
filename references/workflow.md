@@ -17,6 +17,7 @@ Use these defaults because they are explicit in the sample log:
 | Metadata route | clean metadata rewrite with manifest provenance |
 | Storyboard chunking | random `2-8s` segments, exact total duration |
 | Speech model | Whisper/faster-whisper `small` |
+| Release metadata | editable title, description, tags, cover candidates, and queue rows |
 | Jianying route | Jianying Professional `5.9` when available |
 | Storyboard evidence count | default `4` sample episodes unless user requests all |
 
@@ -31,7 +32,7 @@ Collect or infer these before processing:
 - source episode range and output episode range;
 - source-to-output mapping rules, for example `67+68 -> 84`;
 - rights status: owned, licensed, client-provided, or otherwise authorized;
-- whether to create process images, timestamp image, cost image, Jianying screenshots, and publishing tasks.
+- whether to create subtitles, cover candidates, release metadata, process images, timestamp image, cost image, Jianying screenshots, and publishing tasks.
 
 If filenames contain episode numbers, infer the mapping and show a short preview before encoding. If mapping cannot be inferred safely, ask for a CSV or plain-text mapping.
 
@@ -94,7 +95,22 @@ Log pass in this shape:
 
 Retry failed encodes no more than two times. Do not publish or package failed-QC outputs as usable.
 
-## Stage 3: Process Evidence
+## Stage 3: Production Enhancement Pack
+
+Read `references/production-enhancements.md` when preparing a publishable batch. Default to creating editable drafts, not final creative approvals.
+
+Generate:
+
+- subtitle files: `.srt`, `.vtt`, and `.txt` when Whisper/transcript output exists;
+- subtitle QA report with uncertain words, likely homophones, and timing problems;
+- three title candidates per episode, one short Video Channels description, and suggested hashtags;
+- at least three cover frame candidates per episode, plus composed cover images when a template is available;
+- `release_queue.csv` and `release_queue.jsonl` with platform, account placeholder, file path, cover path, title, description, tags, schedule status, QC status, and review status;
+- internal duplicate inventory for the output folder when more than one episode exists.
+
+Run `scripts/check_release_pack.py` against the output folder when possible and include the JSON or CSV report in the manifest.
+
+## Stage 4: Process Evidence
 
 After episode remastering succeeds:
 
@@ -108,7 +124,7 @@ Expected log shape:
 [Series] Process images complete, continuing
 ```
 
-## Stage 4: Timestamp Certificate
+## Stage 5: Timestamp Certificate
 
 Generate a JPG certificate containing:
 
@@ -126,7 +142,7 @@ Expected output filename:
 <output-series>-timestamp.jpg
 ```
 
-## Stage 5: Cost Image
+## Stage 6: Cost Image
 
 Generate a cost/configuration JPG.
 
@@ -150,7 +166,7 @@ Expected filename:
 cost-config.jpg
 ```
 
-## Stage 6: Jianying Storyboard Mode 2
+## Stage 7: Jianying Storyboard Mode 2
 
 Default to four selected episodes for engineering screenshots unless the user requests all episodes.
 
@@ -195,7 +211,7 @@ Expected log phrases:
 [Series] All storyboard mode 2 succeeded, cleaned N Jianying draft folders
 ```
 
-## Stage 7: Optional Publishing
+## Stage 8: Optional Publishing
 
 Publishing is not part of the sample log's completed action, but this workflow may continue into Video Channels or another platform only after explicit user confirmation.
 
@@ -220,6 +236,11 @@ Return:
 - number of episodes generated;
 - output folder;
 - QC summary;
+- subtitles and subtitle QA report;
+- title/description/tag drafts;
+- cover candidates;
+- release queue;
+- platform validation report;
 - process images;
 - timestamp certificate;
 - cost image;

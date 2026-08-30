@@ -1,13 +1,13 @@
 ---
 name: short-drama-batch-remaster
-description: Batch remaster authorized short-drama episodes into vertical release packs with FFmpeg/OpenCV/Whisper, QC logs, process evidence images, timestamp/cost images, and Jianying 5.9 storyboard draft screenshots. Use for short-drama batch optimization, remastering, release-package preparation, or Video Channels-ready deliverables; do not use for unauthorized reposting, watermark removal, or evading platform/copyright detection.
+description: Batch remaster authorized short-drama episodes into vertical release packs with FFmpeg/OpenCV/Whisper, QC logs, subtitles, covers, release metadata, process evidence images, timestamp/cost images, publishing queues, and Jianying 5.9 storyboard draft screenshots. Use for short-drama batch optimization, remastering, release-package preparation, or Video Channels-ready deliverables; do not use for unauthorized reposting, watermark removal, or evading platform/copyright detection.
 ---
 
 # Short Drama Batch Remaster
 
 ## Purpose
 
-Use this skill to reproduce the local short-drama batch workflow represented by the user's sample log: remaster many authorized source episodes into a vertical delivery folder, validate each output, generate evidence images, create Jianying storyboard drafts for selected episodes, import Whisper subtitles, capture engineering screenshots, then clean temporary drafts.
+Use this skill to reproduce the local short-drama batch workflow represented by the user's sample log: remaster many authorized source episodes into a vertical delivery folder, validate each output, generate subtitles, covers, titles, descriptions, release queues, evidence images, Jianying storyboard drafts for selected episodes, imported Whisper subtitles, engineering screenshots, then clean temporary drafts.
 
 The skill is a workflow orchestrator. Use the best available local tools and installed open-source projects rather than forcing one implementation. Install missing first-use dependencies automatically when that can be done without credentials, paid accounts, or unsafe privilege escalation.
 
@@ -37,6 +37,8 @@ Use the script's report to decide the tool route. If a dependency needs administ
 
 For requests that mention watermark handling, reposting, deduplication, rights, attribution, or platform checks, also read [references/rights-safe-transformations.md](references/rights-safe-transformations.md) before choosing tools or writing commands.
 
+For requests that need subtitle QA, sensitive-word review, title/description/hashtag generation, cover packs, Video Channels validation, release queues, or internal library duplicate management, read [references/production-enhancements.md](references/production-enhancements.md).
+
 ## Default Workflow
 
 Follow the log-shaped workflow unless the user explicitly changes settings:
@@ -46,11 +48,12 @@ Follow the log-shaped workflow unless the user explicitly changes settings:
 3. **Batch remaster**: for each output episode, assemble the mapped source episode(s), normalize to `1080x1920`, apply the configured `1.050x` speed change, audio adjustment, visual styling, and clean export metadata for authorized derivatives.
 4. **Encoding target**: encode toward `6500k` video bitrate, H.264/AAC MP4 unless the user requires another delivery profile.
 5. **Per-episode QC**: use `ffprobe` or equivalent to verify duration, resolution, bitrate, file size, stream presence, and readable output. Retry an encoding failure at most twice, then report the episode as failed.
-6. **Process evidence**: after the batch, generate process images/contact sheets and a machine-readable manifest that records inputs, outputs, parameters, timestamps, and QC results.
-7. **Timestamp certificate**: generate a timestamp image containing the output title, folder, generation time, manifest hash, and operator/tool note.
-8. **Cost image**: use WPS/DOCX template export when available; otherwise generate a visually simple image from the same fields. Apply configured signature/seal assets only when the user provided them or they exist in the configured cache path.
-9. **Jianying storyboard mode 2**: for the selected sample episodes, generate Jianying 5.9 drafts, split each episode into random `2-8s` micro-storyboard segments with exact total duration, write a seven-track timeline, run Whisper `small`, import subtitles, open Jianying, seek to the sidecar timestamp, zoom the timeline twice, capture one engineering screenshot per draft, then close Jianying and delete the temporary drafts.
-10. **Delivery**: return the output folder, counts, QC summary, failed items, evidence images, timestamp image, cost image, storyboard screenshots, and any publishing status.
+6. **Production enhancement pack**: create or update subtitles, title/description/tag drafts, cover candidates, Video Channels validation, internal duplicate inventory, and `release_queue` files when requested or useful for publishing.
+7. **Process evidence**: after the batch, generate process images/contact sheets and a machine-readable manifest that records inputs, outputs, parameters, timestamps, QC results, content metadata, and release status.
+8. **Timestamp certificate**: generate a timestamp image containing the output title, folder, generation time, manifest hash, and operator/tool note.
+9. **Cost image**: use WPS/DOCX template export when available; otherwise generate a visually simple image from the same fields. Apply configured signature/seal assets only when the user provided them or they exist in the configured cache path.
+10. **Jianying storyboard mode 2**: for the selected sample episodes, generate Jianying 5.9 drafts, split each episode into random `2-8s` micro-storyboard segments with exact total duration, write a seven-track timeline, run Whisper `small`, import subtitles, open Jianying, seek to the sidecar timestamp, zoom the timeline twice, capture one engineering screenshot per draft, then close Jianying and delete the temporary drafts.
+11. **Delivery**: return the output folder, counts, QC summary, failed items, subtitles, covers, release metadata, release queue, evidence images, timestamp image, cost image, storyboard screenshots, and any publishing status.
 
 ## Tool Routing
 
@@ -59,6 +62,9 @@ Prefer these routes when available:
 - **Video processing**: FFmpeg/ffprobe for concat, trim, scale/crop/pad, speed, audio filters, bitrate control, metadata rewrite, and final validation.
 - **Frame analysis or visual transforms**: OpenCV/Pillow when FFmpeg filters are insufficient.
 - **Speech recognition**: faster-whisper or Whisper `small`; reuse a loaded model inside a batch.
+- **Subtitle and text QA**: generate SRT/VTT/TXT from Whisper output, correct obvious recognition errors only when context supports the edit, and flag uncertain segments for review.
+- **Release metadata**: use local text generation or existing user templates for episode titles, descriptions, hashtags, and Video Channels copy. Keep drafts editable and mark them as unreviewed until the user approves.
+- **Cover generation**: extract candidate frames with FFmpeg/OpenCV, compose simple covers with Pillow, and preserve existing brand templates when provided.
 - **Jianying draft generation**: `pyJianYingDraft`, `jianying-editor-skill`, CapCut Mate, or an existing local Jianying draft writer. Prefer Jianying Professional 5.9 on Windows for automatic opening/export/screenshot workflows.
 - **Jianying UI automation**: native UI automation, Playwright only when it controls a web UI, or computer-use for desktop interactions.
 - **DOCX/PDF/JPG cost image**: WPS Office if available, otherwise Python `python-docx`/Pillow/PyMuPDF/reportlab.
@@ -71,6 +77,7 @@ Mirror the concise progress style of the sample log. Include lines for:
 - source series to output series and episode completion;
 - remaster parameters, output geometry, bitrate target, and metadata handling;
 - QC pass/fail with duration, resolution, bitrate, and size;
+- subtitle, cover, metadata, sensitive-word review, Video Channels validation, and release queue stages;
 - process image, timestamp, cost image, and Jianying storyboard stages;
 - Whisper model, segment count, sidecar timestamp, engineering screenshot path, draft cleanup, and batch summary.
 
@@ -83,5 +90,7 @@ Use neutral wording such as "authorized derivative metadata rewrite" or "metadat
 - If Jianying 5.9 is unavailable, still generate drafts when possible and report that UI screenshots/export are blocked.
 - If WPS is unavailable, generate the cost image via Python and note the fallback.
 - If Whisper confidence or transcript quality is poor, keep the draft but flag subtitles for review.
+- If text or subtitles contain uncertain names, homophones, profanity, medical/financial/legal claims, or platform-sensitive wording, flag them in the review report instead of silently rewriting meaning.
+- If platform validation fails, repair only delivery-format issues automatically; require user review for creative copy, cover choice, and publication.
 - Do not publish failed-QC videos.
 - If a requested operation would remove third-party attribution, hide source identity, defeat content matching, or bypass platform enforcement, stop that operation and offer the closest permitted workflow: owned-brand replacement, attribution-preserving repost package, rights manifest, platform-spec validation, or duplicate-asset inventory.
