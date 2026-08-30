@@ -16,6 +16,7 @@ from release_readiness import (  # noqa: E402
     aggregate_status,
     evaluate_release,
     write_readiness_reports,
+    rights_and_review_rules,
 )
 
 
@@ -65,6 +66,31 @@ class ReleaseReadinessTests(unittest.TestCase):
     def test_duplicate_rule_ids_are_rejected_per_subject(self) -> None:
         with self.assertRaisesRegex(ValueError, "duplicate readiness rule"):
             ReadinessReport.from_results("episode-001", [rule("media.readable"), rule("media.readable")])
+
+    def test_missing_required_ai_decision_blocks_readiness(self) -> None:
+        context = {"rights_status": "owned", "disclosure": {"ai_content": True, "ai_label": None}}
+        rules = {item.rule_id: item for item in rights_and_review_rules(context)}
+        self.assertEqual((rules["disclosure.ai"].severity, rules["disclosure.ai"].status), ("blocker", "fail"))
+
+    def test_planned_ai_label_and_missing_rights_evidence_are_warnings(self) -> None:
+        context = {
+            "rights_status": "owned",
+            "rights_evidence": "",
+            "disclosure": {"ai_content": True, "ai_label": "planned"},
+        }
+        rules = {item.rule_id: item for item in rights_and_review_rules(context)}
+        self.assertEqual((rules["disclosure.ai"].severity, rules["disclosure.ai"].status), ("warning", "fail"))
+        self.assertEqual((rules["rights.evidence"].severity, rules["rights.evidence"].status), ("warning", "fail"))
+
+    def test_publication_requires_approval(self) -> None:
+        context = {
+            "rights_status": "licensed",
+            "rights_evidence": "license-42",
+            "disclosure": {"ai_content": False, "ai_label": "not-applicable"},
+            "publishing": {"prepare": True, "approved": False},
+        }
+        rules = {item.rule_id: item for item in rights_and_review_rules(context)}
+        self.assertEqual((rules["publishing.approval"].severity, rules["publishing.approval"].status), ("blocker", "fail"))
 
 
 if __name__ == "__main__":

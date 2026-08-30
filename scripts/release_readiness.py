@@ -87,6 +87,114 @@ def evaluate_release(subject: str, *rule_groups: Iterable[RuleResult]) -> Readin
     return ReadinessReport.from_results(subject, rules)
 
 
+def _review_rule(rule_id: str, enabled: bool, status: str | None) -> RuleResult:
+    approved = not enabled or status == "approved"
+    return RuleResult(
+        rule_id,
+        "warning",
+        "pass" if approved else "fail",
+        f"enabled={enabled}; review_status={status or 'not-recorded'}",
+        "review and approve the generated creative asset" if not approved else "",
+    )
+
+
+def rights_and_review_rules(context: dict[str, Any]) -> list[RuleResult]:
+    rights_status = context.get("rights_status")
+    valid_rights = rights_status in {"owned", "licensed", "client-provided", "authorized"}
+    rights_evidence = str(context.get("rights_evidence", "")).strip()
+    attribution = context.get("attribution", {})
+    attribution_required = bool(attribution.get("required"))
+    attribution_text = str(attribution.get("text", "")).strip()
+    attribution_approved = bool(attribution.get("approved"))
+    disclosure = context.get("disclosure", {})
+    ai_content = disclosure.get("ai_content")
+    ai_label = disclosure.get("ai_label")
+    enhancements = context.get("enhancements", {})
+    reviews = context.get("artifact_reviews", {})
+    publishing = context.get("publishing", {})
+
+    if not attribution_required:
+        attribution_rule = RuleResult("attribution.required", "blocker", "pass", "attribution not required", "")
+    elif not attribution_text:
+        attribution_rule = RuleResult(
+            "attribution.required",
+            "blocker",
+            "fail",
+            "required attribution text is missing",
+            "record and preserve the required attribution text",
+        )
+    elif not attribution_approved:
+        attribution_rule = RuleResult(
+            "attribution.required",
+            "warning",
+            "fail",
+            f"attribution recorded but not approved: {attribution_text}",
+            "confirm that the required attribution is present in the release package",
+        )
+    else:
+        attribution_rule = RuleResult("attribution.required", "blocker", "pass", attribution_text, "")
+
+    if ai_content is True and ai_label not in {"planned", "applied"}:
+        disclosure_rule = RuleResult(
+            "disclosure.ai",
+            "blocker",
+            "fail",
+            "AI-generated content is declared but label status is missing",
+            "record a planned or applied AI-content label",
+        )
+    elif ai_content is True and ai_label == "planned":
+        disclosure_rule = RuleResult(
+            "disclosure.ai",
+            "warning",
+            "fail",
+            "AI-content label is planned but not yet applied",
+            "apply and confirm the required AI-content label before publishing",
+        )
+    elif ai_content is True:
+        disclosure_rule = RuleResult("disclosure.ai", "blocker", "pass", "AI-content label applied", "")
+    elif ai_content is False:
+        disclosure_rule = RuleResult("disclosure.ai", "blocker", "pass", "content declared as not AI-generated", "")
+    else:
+        disclosure_rule = RuleResult(
+            "disclosure.ai",
+            "blocker",
+            "fail",
+            "AI-content decision is not recorded",
+            "record whether the content contains AI-generated material",
+        )
+
+    publish_requested = bool(publishing.get("prepare"))
+    publish_approved = bool(publishing.get("approved"))
+    return [
+        RuleResult(
+            "rights.status",
+            "blocker",
+            "pass" if valid_rights else "fail",
+            f"rights_status={rights_status}",
+            "record a supported rights status" if not valid_rights else "",
+        ),
+        RuleResult(
+            "rights.evidence",
+            "warning",
+            "pass" if rights_evidence else "fail",
+            rights_evidence or "no rights evidence reference recorded",
+            "attach or reference the ownership, license, or client authorization record" if not rights_evidence else "",
+        ),
+        attribution_rule,
+        disclosure_rule,
+        _review_rule("cover.review", bool(enhancements.get("covers")), reviews.get("cover")),
+        _review_rule("copy.review", bool(enhancements.get("copy") or enhancements.get("metadata")), reviews.get("copy")),
+        _review_rule("narration.review", bool(enhancements.get("narration")), reviews.get("narration")),
+        RuleResult(
+            "publishing.approval",
+            "blocker",
+            "pass" if not publish_requested or publish_approved else "fail",
+            f"prepare={publish_requested}; approved={publish_approved}",
+            "obtain explicit publication approval" if publish_requested and not publish_approved else "",
+        ),
+    ]
+
+
 def _atomic_write(path: Path, text: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temp_path = path.with_suffix(path.suffix + ".tmp")

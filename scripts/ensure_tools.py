@@ -17,6 +17,9 @@ from typing import Iterable
 
 PY_PACKAGES = {
     "core": [],
+    "quality": [
+        ("srt", "srt"),
+    ],
     "vision": [
         ("cv2", "opencv-python"),
         ("numpy", "numpy"),
@@ -43,6 +46,7 @@ PY_PACKAGES = {
 
 EXECUTABLES = {
     "core": ["ffmpeg", "ffprobe"],
+    "quality": [],
     "vision": [],
     "whisper": [],
     "jianying": [],
@@ -201,7 +205,7 @@ def main() -> int:
     parser.add_argument(
         "--features",
         default="core,vision,whisper,jianying,docs,ui",
-        help="Comma-separated feature set: core,vision,whisper,jianying,docs,ui,publish",
+        help="Comma-separated feature set: core,quality,vision,whisper,jianying,docs,ui,publish",
     )
     parser.add_argument("--install", action="store_true", help="Attempt automatic installation of missing dependencies.")
     parser.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
