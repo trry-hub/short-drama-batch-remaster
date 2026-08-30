@@ -16,7 +16,8 @@ from typing import Iterable
 
 
 PY_PACKAGES = {
-    "core": [
+    "core": [],
+    "vision": [
         ("cv2", "opencv-python"),
         ("numpy", "numpy"),
         ("PIL", "Pillow"),
@@ -42,6 +43,7 @@ PY_PACKAGES = {
 
 EXECUTABLES = {
     "core": ["ffmpeg", "ffprobe"],
+    "vision": [],
     "whisper": [],
     "jianying": [],
     "docs": [],
@@ -56,6 +58,7 @@ class CheckResult:
     name: str
     present: bool
     installed: bool = False
+    requires_user_action: bool = False
     note: str = ""
 
 
@@ -158,6 +161,7 @@ def check_executables(features: Iterable[str], install: bool) -> list[CheckResul
                 name=exe,
                 present=present,
                 installed=ffmpeg_installed if exe in {"ffmpeg", "ffprobe"} and present else False,
+                requires_user_action=not present,
                 note=ffmpeg_note if exe in {"ffmpeg", "ffprobe"} and not present else "",
             )
         )
@@ -185,6 +189,7 @@ def check_python(features: Iterable[str], install: bool) -> list[CheckResult]:
                     name=package,
                     present=present,
                     installed=installed,
+                    requires_user_action=not present,
                     note="" if present else note,
                 )
             )
@@ -195,8 +200,8 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--features",
-        default="core,whisper,jianying,docs,ui",
-        help="Comma-separated feature set: core,whisper,jianying,docs,ui,publish",
+        default="core,vision,whisper,jianying,docs,ui",
+        help="Comma-separated feature set: core,vision,whisper,jianying,docs,ui,publish",
     )
     parser.add_argument("--install", action="store_true", help="Attempt automatic installation of missing dependencies.")
     parser.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
